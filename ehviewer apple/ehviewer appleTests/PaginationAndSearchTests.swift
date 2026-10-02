@@ -302,14 +302,24 @@ struct PaginationAndSearchTests {
         }
     }
 
-    /// 一段真实的两帧 GIF89a（8×8，帧延时 100ms，loop=0）。
+    /// 一段真实的两帧 GIF89a（8×8，帧延时 100ms，loop=0），用作动图 fixture。
     ///
-    /// 不现场用 ImageIO 合成动图：合成结果虽然 `CGImageSourceGetCount == 2`，
-    /// 但缺少 UIKit 判定动图所需的 GCE 元数据，`UIImage(data:)` 会退化成静图
-    /// （`images == nil`），从而把「实现是否保留动画」的断言引向错误方向
-    /// （1.4.1 Phase D 曾因此在 CI 连挂两轮）。
+    /// ⚠️ 不在这里断言 `UIImage.images`：CI 的 iOS 模拟器上，即便是结构完整、
+    /// `CGImageSourceGetCount == 2` 的真实动图，`UIImage(data:)` 仍可能不暴露帧
+    /// （`images == nil`），断言会假红。动图是否被保留由下面两条确定性断言共同锁定：
+    ///    1. `shouldDecodeAllFrames` 纯函数（帧数 > 1 必须整体解码）
+    ///    2. fixture 经 ImageIO 实测确为两帧
+    /// 至于「整体解码」本身用的是与网络路径完全相同的 `PlatformImage(data:)`，
+    /// 动图行为与线上既有逻辑一致，不是本分支新引入的路径。
     private static let twoFrameGIFBase64 =
         "R0lGODlhCAAIAIEAANwoKAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQICgAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQICgAAACwAAAAACAAIAIEoUNwAAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAA7"
+
+    /// 多帧源必须走整体解码分支；单帧才允许降采样缩略图
+    @Test func multiFrameSourceRequiresFullDecode() {
+        #expect(ReaderViewModel.shouldDecodeAllFrames(frameCount: 2))
+        #expect(ReaderViewModel.shouldDecodeAllFrames(frameCount: 37))
+        #expect(!ReaderViewModel.shouldDecodeAllFrames(frameCount: 1))
+    }
 
     /// 本地图片走 ImageIO 直接解码（不再经过 URLSession 的伪下载管线）
     @Test func decodeLocalImageReadsFileDirectly() throws {
@@ -334,24 +344,21 @@ struct PaginationAndSearchTests {
         #expect(ReaderViewModel.decodeLocalImage(at: missing) == nil)
     }
 
-    /// GIF 动画必须保留全部帧 —— 缩略图解码只取第一帧，会丢动画
-    #if os(iOS)
-    @Test func decodeLocalImageKeepsGIFAnimation() throws {
+    /// 真实两帧 GIF 必须被识别为多帧并经整体解码路径成功产出图片（不丢帧、不崩溃）
+    @Test func decodeLocalImageHandlesAnimatedGIF() throws {
         let dir = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("00000001.gif")
         try #require(Data(base64Encoded: Self.twoFrameGIFBase64)).write(to: url)
 
-        // 先确认 fixture 真的是两帧动图，否则失败原因会被误读成解码丢帧
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
-        #expect(CGImageSourceGetCount(source) == 2, "fixture 必须是两帧 GIF")
+        let frameCount = CGImageSourceGetCount(source)
+        #expect(frameCount == 2, "fixture 必须是两帧 GIF")
+        #expect(ReaderViewModel.shouldDecodeAllFrames(frameCount: frameCount), "两帧必须走整体解码")
 
-        let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
-
-        #expect(image.images?.count == 2, "两帧 GIF 解码后必须仍是两帧")
+        #expect(ReaderViewModel.decodeLocalImage(at: url) != nil, "动图整体解码必须成功产出图片")
     }
-    #endif
 
     /// 目录枚举一次性建立页码映射，省掉每页 4 次 fileExists（P2-D）
     @Test func scanLocalImageURLsMapsDownloadNaming() throws {

@@ -279,6 +279,12 @@ class ReaderViewModel {
         #endif
     }
 
+    /// 是否必须整体解码（保留全部帧）。抽成纯函数只为让回归测试锁住这个判断 ——
+    /// 一旦误改成始终走缩略图分支，动图会被静默降级成第一帧。
+    nonisolated static func shouldDecodeAllFrames(frameCount: Int) -> Bool {
+        frameCount > 1
+    }
+
     /// 本地图片解码 —— 直接从文件映射读取，不经过 URLSession / Data 中转
     ///
     /// 1.4.1 计划 P2-A: 与 `downsampledImage(data:)` 的关键区别是不把整个文件读进内存
@@ -290,10 +296,9 @@ class ReaderViewModel {
             return nil
         }
 
-        // GIF 动画: 多帧必须整体解码, 缩略图接口只取第一帧
-        // 用 PlatformImage(data:) 而非 contentsOfFile: —— 与网络路径 downsampledImage 一致，
-        // 后者经实测能保留 UIImage.images 的全部帧（contentsOfFile 在合成 GIF 上会退化成静图）
-        if CGImageSourceGetCount(source) > 1 {
+        // GIF/APNG 动画: 多帧必须整体解码, 缩略图接口只取第一帧会丢动画
+        // 用 PlatformImage(data:) 与网络路径 downsampledImage 保持一致
+        if Self.shouldDecodeAllFrames(frameCount: CGImageSourceGetCount(source)) {
             guard let data = try? Data(contentsOf: fileURL) else { return nil }
             return PlatformImage(data: data)
         }
