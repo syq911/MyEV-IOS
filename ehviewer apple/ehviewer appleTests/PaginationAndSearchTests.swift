@@ -276,7 +276,7 @@ struct PaginationAndSearchTests {
         return dir
     }
 
-    private static func makeCGImage(width: Int, height: Int, shade: CGFloat = 0.5) -> CGImage? {
+    private static func makeCGImage(width: Int, height: Int) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: width,
@@ -286,38 +286,30 @@ struct PaginationAndSearchTests {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        ctx.setFillColor(CGColor(red: shade, green: 0.4, blue: 0.8, alpha: 1))
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return ctx.makeImage()
     }
 
-    /// 用 ImageIO 落一张真实图片到磁盘。
-    /// frames > 1 时写 GIF 动画：每帧用不同 shade + 显式帧延时，
-    /// 避免 ImageIO 把「逐帧相同」的图合并成一帧，导致 fixture 本身就不是动图。
-    private static func writeImage(
-        width: Int,
-        height: Int,
-        to url: URL,
-        type: CFString,
-        frames: Int
-    ) throws {
-        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, frames, nil) else {
+    /// 用 ImageIO 落一张单帧真实图片到磁盘（PNG 解码分支用）
+    private static func writeImage(_ image: CGImage, to url: URL, type: CFString) throws {
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
             throw NSError(domain: "PaginationAndSearchTests", code: 1)
         }
-        let frameProperties: CFDictionary? = frames > 1
-            ? [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.1]] as CFDictionary
-            : nil
-        for frame in 0..<frames {
-            let shade = frames > 1 ? CGFloat(frame) / CGFloat(frames) : 0.5
-            guard let image = makeCGImage(width: width, height: height, shade: shade) else {
-                throw NSError(domain: "PaginationAndSearchTests", code: 3)
-            }
-            CGImageDestinationAddImage(destination, image, frameProperties)
-        }
+        CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "PaginationAndSearchTests", code: 2)
         }
     }
+
+    /// 一段真实的两帧 GIF89a（8×8，帧延时 100ms，loop=0）。
+    ///
+    /// 不现场用 ImageIO 合成动图：合成结果虽然 `CGImageSourceGetCount == 2`，
+    /// 但缺少 UIKit 判定动图所需的 GCE 元数据，`UIImage(data:)` 会退化成静图
+    /// （`images == nil`），从而把「实现是否保留动画」的断言引向错误方向
+    /// （1.4.1 Phase D 曾因此在 CI 连挂两轮）。
+    private static let twoFrameGIFBase64 =
+        "R0lGODlhCAAIAIEAANwoKAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQICgAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQICgAAACwAAAAACAAIAIEoUNwAAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAA7"
 
     /// 本地图片走 ImageIO 直接解码（不再经过 URLSession 的伪下载管线）
     @Test func decodeLocalImageReadsFileDirectly() throws {
@@ -325,7 +317,8 @@ struct PaginationAndSearchTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("00000001.png")
-        try Self.writeImage(width: 40, height: 30, to: url, type: "public.png" as CFString, frames: 1)
+        let cgImage = try #require(Self.makeCGImage(width: 40, height: 30))
+        try Self.writeImage(cgImage, to: url, type: "public.png" as CFString)
 
         let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
 
@@ -341,14 +334,14 @@ struct PaginationAndSearchTests {
         #expect(ReaderViewModel.decodeLocalImage(at: missing) == nil)
     }
 
-    /// GIF 动画必须保留全部帧 —— 缩略图接口只取第一帧，会丢动画
+    /// GIF 动画必须保留全部帧 —— 缩略图解码只取第一帧，会丢动画
     #if os(iOS)
     @Test func decodeLocalImageKeepsGIFAnimation() throws {
         let dir = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("00000001.gif")
-        try Self.writeImage(width: 20, height: 20, to: url, type: "com.compuserve.gif" as CFString, frames: 2)
+        try #require(Data(base64Encoded: Self.twoFrameGIFBase64)).write(to: url)
 
         // 先确认 fixture 真的是两帧动图，否则失败原因会被误读成解码丢帧
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
