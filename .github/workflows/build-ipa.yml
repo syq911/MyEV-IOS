@@ -37,7 +37,18 @@ jobs:
             -scheme "ehviewer apple"
 
       # 不做签名：ipa 的可安装性由安装时用用户自己的 Apple ID 重签来保证。
-      # 注意命令行覆盖版本号，工程文件里的 MARKETING_VERSION 不动。
+      # 版本号优先取 tag（v1.4.1 → 1.4.1），分支构建用默认值；这样 tag 与 ipa 内版本永不漂移。
+      - name: Resolve marketing version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="1.4.1"
+          fi
+          echo "版本号: $VERSION"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Archive (unsigned)
         run: |
           xcodebuild archive \
@@ -45,7 +56,7 @@ jobs:
             -scheme "ehviewer apple" \
             -destination "generic/platform=iOS" \
             -archivePath build/EhViewer.xcarchive \
-            MARKETING_VERSION=1.4.0 \
+            MARKETING_VERSION=${{ steps.ver.outputs.value }} \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGNING_ALLOWED=NO \
