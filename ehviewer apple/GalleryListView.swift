@@ -26,6 +26,8 @@ struct GalleryListView: View {
         case popular
         case search(keyword: String)
         case tag(keyword: String)
+        /// 指定上传者列表 (/uploader/<name>) —— 对齐 Android ListUrlBuilder.MODE_UPLOADER
+        case uploader(keyword: String)
         case favorites(slot: Int)
 
         var isSubscription: Bool {
@@ -36,7 +38,6 @@ struct GalleryListView: View {
 
     @State private var viewModel = GalleryListViewModel()
     @State private var showQuickSearch = false
-    @State private var showAdvancedSearch = false
     @State private var showTagSelector = false
     @State private var advancedSearch = AdvancedSearchState()
     @State private var selectedQuickSearch: QuickSearchRecord?
@@ -142,6 +143,10 @@ struct GalleryListView: View {
                             // 标签点击推入的画廊列表 (对齐 Android: onTagClick → 叠加新列表)
                             GalleryListView(mode: .tag(keyword: dest.tag), selection: $selectedGallery)
                         }
+                        .navigationDestination(for: UploaderSearchDestination.self) { dest in
+                            // 上传者点击推入的画廊列表 (对齐 Android: 上传者 → /uploader/<name>)
+                            GalleryListView(mode: .uploader(keyword: dest.uploader), selection: $selectedGallery)
+                        }
                 }
                 .navigationSplitViewColumnWidth(min: 350, ideal: 400, max: 500)
             } detail: {
@@ -157,6 +162,9 @@ struct GalleryListView: View {
                 .environment(\.tagNavigationAction, TagNavigationAction { tag in
                     sidebarPath.append(TagSearchDestination(tag: tag))
                 })
+                .environment(\.uploaderNavigationAction, UploaderNavigationAction { uploader in
+                    sidebarPath.append(UploaderSearchDestination(uploader: uploader))
+                })
             }
         } else {
             // iPhone: 单栏布局
@@ -171,17 +179,12 @@ struct GalleryListView: View {
             if case .tag(let keyword) = mode, viewModel.searchText.isEmpty {
                 viewModel.searchText = keyword
             }
+            // 注意: 上传者模式不预填搜索框 —— effectiveMode 会把非空搜索框降级为关键词搜索，
+            // 那样就丢失了 /uploader/<name> 语义 (关键词搜不到该上传者的画廊)
             // 安全兜底: 确保数据加载在任何分支下都能触发
             if viewModel.galleries.isEmpty && !viewModel.isLoading {
                 print("[EhView] body .task → loadGalleries")
                 viewModel.loadGalleries(mode: mode)
-            }
-        }
-        .onChange(of: showAdvancedSearch) { _, isShowing in
-            if !isShowing {
-                // 高级搜索面板关闭时，静默保存参数到 ViewModel (不自动触发搜索)
-                // 用户提交搜索或点击搜索按钮时才会使用这些参数
-                viewModel.syncAdvancedSettings(advancedSearch)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .galleryFavoriteChanged)) { notification in
@@ -225,6 +228,10 @@ struct GalleryListView: View {
             .navigationDestination(for: TagSearchDestination.self) { dest in
                 GalleryListView(mode: .tag(keyword: dest.tag), isPushed: true)
             }
+            // 上传者点击推入的画廊列表 (对齐 Android: 上传者 → /uploader/<name>)
+            .navigationDestination(for: UploaderSearchDestination.self) { dest in
+                GalleryListView(mode: .uploader(keyword: dest.uploader), isPushed: true)
+            }
             .navigationTitle(navigationTitle)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -249,9 +256,6 @@ struct GalleryListView: View {
                     onDismiss: { showQuickSearch = false }
                 )
             }
-            .sheet(isPresented: $showAdvancedSearch) {
-                AdvancedSearchView(state: advancedSearch)
-            }
             .sheet(isPresented: $showTagSelector) {
                 TagSelectorView { keyword in
                     viewModel.appendSearchKeyword(keyword)
@@ -259,7 +263,7 @@ struct GalleryListView: View {
             }
             .onChange(of: selectedQuickSearch) { _, newValue in
                 if let search = newValue {
-                    viewModel.applyQuickSearch(search)
+                    applyQuickSearch(search)
                     selectedQuickSearch = nil
                 }
             }
@@ -324,9 +328,6 @@ struct GalleryListView: View {
                 onDismiss: { showQuickSearch = false }
             )
         }
-        .sheet(isPresented: $showAdvancedSearch) {
-            AdvancedSearchView(state: advancedSearch)
-        }
         .sheet(isPresented: $showTagSelector) {
             TagSelectorView { keyword in
                 viewModel.appendSearchKeyword(keyword)
@@ -334,7 +335,7 @@ struct GalleryListView: View {
         }
         .onChange(of: selectedQuickSearch) { _, newValue in
             if let search = newValue {
-                viewModel.applyQuickSearch(search)
+                applyQuickSearch(search)
                 selectedQuickSearch = nil
             }
         }
@@ -371,6 +372,7 @@ struct GalleryListView: View {
         case .popular: return "热门"
         case .search(let kw): return "搜索: \(kw)"
         case .tag: return "标签搜索"  // 对齐 Android: 标签关键字显示在搜索框而非标题
+        case .uploader(let kw): return "上传者: \(kw)"
         case .favorites: return "收藏"
         }
     }
@@ -524,9 +526,6 @@ struct GalleryListView: View {
                 onDismiss: { showQuickSearch = false }
             )
         }
-        .sheet(isPresented: $showAdvancedSearch) {
-            AdvancedSearchView(state: advancedSearch)
-        }
         .sheet(isPresented: $showTagSelector) {
             TagSelectorView { keyword in
                 viewModel.appendSearchKeyword(keyword)
@@ -534,7 +533,7 @@ struct GalleryListView: View {
         }
         .onChange(of: selectedQuickSearch) { _, newValue in
             if let search = newValue {
-                viewModel.applyQuickSearch(search)
+                applyQuickSearch(search)
                 selectedQuickSearch = nil
             }
         }
@@ -560,6 +559,19 @@ struct GalleryListView: View {
     }
 
     // MARK: - 搜索栏 (对齐 Android SearchBar，从 toolbar 移到 body header 以获得完整宽度)
+
+    /// 应用快速搜索：先把记录里的筛选同步回搜索面板，保证面板状态与实际请求一致
+    /// （对齐 Android ListUrlBuilder(q: QuickSearch)）
+    private func applyQuickSearch(_ search: QuickSearchRecord) {
+        advancedSearch.restore(
+            category: search.category,
+            advanceSearch: search.advanceSearch,
+            minRating: search.minRating,
+            pageFrom: search.pageFrom,
+            pageTo: search.pageTo
+        )
+        viewModel.applyQuickSearch(search)
+    }
 
     private var searchBarView: some View {
         HStack(spacing: 6) {
@@ -602,15 +614,6 @@ struct GalleryListView: View {
                     .foregroundStyle(.primary)
             }
             .buttonStyle(.plain)
-
-            // 搜索选项按钮 (始终可见, 对齐 Android AddDeleteDrawable)
-            Button {
-                showAdvancedSearch = true
-            } label: {
-                Image(systemName: advancedSearch.isEnabled ? "plus.circle.fill" : "plus.circle")
-                    .foregroundStyle(.primary)
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -642,14 +645,11 @@ struct GalleryListView: View {
         }
     }
 
-    // MARK: - 搜索建议浮层 (对齐 Android SearchBar.updateSuggestions 下拉列表)
+    // MARK: - 搜索面板浮层 (分类/筛选 chips + 搜索历史/标签建议，对齐 Android SearchBarScreen)
 
     @ViewBuilder
     private var searchSuggestionsOverlay: some View {
-        let showHistory = viewModel.searchText.isEmpty && !viewModel.searchHistory.isEmpty
-        let showSuggestions = !viewModel.searchText.isEmpty && !viewModel.suggestions.isEmpty
-
-        if isSearchFocused && (showHistory || showSuggestions) {
+        if isSearchFocused {
             ZStack(alignment: .top) {
                 // 点击空白关闭
                 Color.clear
@@ -658,54 +658,78 @@ struct GalleryListView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        // 搜索历史 (搜索框为空时)
-                        if showHistory {
-                            HStack {
-                                Text("搜索历史")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Button("清除") { viewModel.clearSearchHistory() }
-                                    .font(.caption)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
+                        // 第一行分类 chips + 第二行筛选 chips
+                        SearchFilterPanel(state: advancedSearch)
 
-                            ForEach(viewModel.searchHistory, id: \.self) { term in
-                                Button {
-                                    viewModel.searchText = term
-                                    isSearchFocused = false
-                                    viewModel.searchWithAdvanced(advancedSearch)
-                                } label: {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "clock")
-                                            .foregroundStyle(.secondary)
-                                        Text(term)
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(1)
-                                        Spacer()
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                Divider().padding(.leading, 48)
-                            }
-                        }
+                        Divider()
 
-                        // 标签建议 (搜索框有内容时)
-                        if showSuggestions {
+                        // 搜索框为空 → 历史；有输入 → 标签建议
+                        if viewModel.searchText.isEmpty {
+                            searchHistoryList
+                        } else {
                             searchSuggestionsContent
                         }
                     }
                 }
-                .frame(maxHeight: 300)
+                .frame(maxHeight: 420)
                 .background(.regularMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - 搜索历史 (一行一条，× 删单条)
+
+    @ViewBuilder
+    private var searchHistoryList: some View {
+        if !viewModel.searchHistory.isEmpty {
+            HStack {
+                Text("搜索历史")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("清除") { viewModel.clearSearchHistory() }
+                    .font(.caption)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            ForEach(viewModel.searchHistory, id: \.self) { term in
+                HStack(spacing: 10) {
+                    Button {
+                        viewModel.searchText = term
+                        isSearchFocused = false
+                        viewModel.searchWithAdvanced(advancedSearch)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock")
+                                .foregroundStyle(.secondary)
+                            Text(term)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        viewModel.removeSearchHistory(term)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                Divider().padding(.leading, 48)
             }
         }
     }
@@ -1299,6 +1323,8 @@ class GalleryListViewModel {
     private var currentPageTo: Int = -1
     private var currentCategory: Int = 0
     private var currentSearchMode: SearchMode = .normal
+    /// 语言筛选 (-1 不限)；不进 f_search 之外的地方，仅由搜索面板设置
+    private var currentLanguage: Int = -1
 
     func loadGalleries(mode: GalleryListView.ListMode) {
         guard !isLoading else {
@@ -1402,6 +1428,7 @@ class GalleryListViewModel {
         currentPageTo = -1
         currentCategory = 0
         currentSearchMode = .normal
+        currentLanguage = -1
 
         Task {
             await fetchPage(mode: .search(keyword: searchText), page: 0)
@@ -1418,6 +1445,7 @@ class GalleryListViewModel {
         currentPageTo = state.pageToValue
         currentCategory = state.categoryValue
         currentSearchMode = state.searchMode
+        currentLanguage = state.language
 
         // 没有关键字时，按分类过滤首页 (对齐 Android: 无关键字也能按分类搜索)
         if searchText.isEmpty {
@@ -1442,53 +1470,6 @@ class GalleryListViewModel {
         Task {
             await fetchPage(mode: .search(keyword: searchText), page: 0)
         }
-    }
-
-    /// 高级搜索面板关闭后自动应用设置 (对齐 Android GalleryListScene.onApplySearch)
-    func applyAdvancedSettings(_ state: AdvancedSearchState, initialMode: GalleryListView.ListMode) {
-        syncAdvancedSettings(state)
-
-        // 清除缓存，强制使用新参数重新加载
-        if let key = currentCacheKey {
-            GalleryCache.shared.removeListResult(forKey: key)
-        }
-
-        // 有活跃搜索关键字时，重新执行搜索
-        if !searchText.isEmpty {
-            galleries = []
-            isLoading = true
-            errorMessage = nil
-            currentPage = 0
-            prevHref = nil
-            nextHref = nil
-            Task {
-                await fetchPage(mode: .search(keyword: searchText), page: 0)
-            }
-            return
-        }
-
-        // 首页模式: 用分类重新加载
-        if case .home = initialMode {
-            galleries = []
-            isLoading = true
-            errorMessage = nil
-            currentPage = 0
-            prevHref = nil
-            nextHref = nil
-            Task {
-                await fetchPage(mode: .home, page: 0)
-            }
-        }
-    }
-
-    /// 静默同步高级搜索参数到 ViewModel (不触发搜索)
-    func syncAdvancedSettings(_ state: AdvancedSearchState) {
-        currentCategory = state.categoryValue
-        currentSearchMode = state.searchMode
-        currentAdvanceSearch = state.advanceSearchValue
-        currentMinRating = state.minRatingValue
-        currentPageFrom = state.pageFromValue
-        currentPageTo = state.pageToValue
     }
 
     func applyQuickSearch(_ search: QuickSearchRecord) {
@@ -1784,6 +1765,9 @@ class GalleryListViewModel {
             case .tag(let keyword):
                 let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? keyword
                 baseUrl = "\(EhURL.host(for: site))tag/\(encoded)"
+            case .uploader(let keyword):
+                let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? keyword
+                baseUrl = "\(EhURL.host(for: site))uploader/\(encoded)"
             case .favorites(let slot):
                 if slot < 0 {
                     baseUrl = EhURL.favoritesUrl(for: site)
@@ -1935,6 +1919,7 @@ class GalleryListViewModel {
                 builder.minRating = currentMinRating
                 builder.pageFrom = currentPageFrom
                 builder.pageTo = currentPageTo
+                builder.language = currentLanguage
                 urlString = builder.build(site: site)
             case .home:
                 // ★ 首页同样要带上高级搜索参数 (对齐 Android GalleryListScene:
@@ -1948,6 +1933,7 @@ class GalleryListViewModel {
                 builder.minRating = currentMinRating
                 builder.pageFrom = currentPageFrom
                 builder.pageTo = currentPageTo
+                builder.language = currentLanguage
                 urlString = builder.build(site: site)
             case .popular:
                 urlString = EhURL.popularUrl(for: site)
@@ -1961,6 +1947,7 @@ class GalleryListViewModel {
                 builder.pageFrom = currentPageFrom
                 builder.pageTo = currentPageTo
                 builder.category = currentCategory
+                builder.language = currentLanguage
                 urlString = builder.build(site: site)
             case .tag(let keyword):
                 let encoded = keyword.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? keyword
@@ -1969,6 +1956,13 @@ class GalleryListViewModel {
                 } else {
                     urlString = "\(host)tag/\(encoded)"
                 }
+            case .uploader(let keyword):
+                // 对齐 Android: ListUrlBuilder.MODE_UPLOADER → /uploader/<name>[/page]
+                var builder = ListUrlBuilder()
+                builder.mode = .uploader
+                builder.keyword = keyword
+                builder.pageIndex = page
+                urlString = builder.build(site: site)
             case .favorites(let slot):
                 // slot -1 = 全部收藏, 0-9 = 指定收藏夹 (对齐 Android FavoritesScene)
                 var favUrl: String
@@ -2049,7 +2043,7 @@ class GalleryListViewModel {
     /// 当前生效的筛选条件签名 — 参与缓存 key，
     /// 否则改了分类/最低评分后仍会命中旧的未过滤缓存
     private var filterSignature: String {
-        "\(currentSearchMode.rawValue)|\(currentCategory)|\(currentAdvanceSearch)|\(currentMinRating)|\(currentPageFrom)-\(currentPageTo)"
+        "\(currentSearchMode.rawValue)|\(currentCategory)|\(currentAdvanceSearch)|\(currentMinRating)|\(currentPageFrom)-\(currentPageTo)|lang\(currentLanguage)"
     }
 
     /// 生成缓存 key
@@ -2060,6 +2054,7 @@ class GalleryListViewModel {
         case .popular: return "popular:\(page)"
         case .search(let kw): return "search:\(kw):\(filterSignature):\(page)"
         case .tag(let kw): return "tag:\(kw):\(page)"
+        case .uploader(let kw): return "uploader:\(kw):\(page)"
         case .favorites(let slot): return "fav:\(slot):\(favSearchKeyword ?? ""):\(page)"
         }
     }

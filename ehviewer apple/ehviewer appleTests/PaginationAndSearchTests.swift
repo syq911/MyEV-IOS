@@ -146,6 +146,48 @@ struct PaginationAndSearchTests {
         #expect(url.contains("f_search="))
     }
 
+    // MARK: - 语言过滤 (Phase 6 搜索面板, 对齐 Android ListUrlBuilder.build)
+
+    private static func searchValue(of url: String) -> String? {
+        URLComponents(string: url)?.queryItems?.first { $0.name == "f_search" }?.value
+    }
+
+    /// 语言不是独立 URL 参数，而是以 language:xxx 前缀并入 f_search
+    @Test func languageFilterPrefixesKeyword() {
+        var builder = ListUrlBuilder()
+        builder.mode = .normal
+        builder.keyword = "test"
+        builder.language = 1  // ListUrlBuilder.languageTags[1] == language:chinese
+
+        let url = builder.build(site: .eHentai)
+
+        #expect(Self.searchValue(of: url) == "language:chinese test")
+        #expect(!url.contains("advsearch"))
+    }
+
+    /// 关键词已含 language:/l:/gid: 限定时不重复注入，避免双重过滤
+    @Test func languageFilterSkipsWhenKeywordAlreadyQualified() {
+        var builder = ListUrlBuilder()
+        builder.mode = .normal
+        builder.keyword = "language:english test"
+        builder.language = 1
+
+        let url = builder.build(site: .eHentai)
+
+        #expect(Self.searchValue(of: url) == "language:english test")
+    }
+
+    /// 未选语言时不注入前缀
+    @Test func noLanguageMeansPlainKeyword() {
+        var builder = ListUrlBuilder()
+        builder.mode = .normal
+        builder.keyword = "test"
+
+        let url = builder.build(site: .eHentai)
+
+        #expect(Self.searchValue(of: url) == "test")
+    }
+
     /// 订阅模式指向 /watched (issue #9: 只看订阅标签)
     @Test func subscriptionModeUsesWatchedUrl() {
         var builder = ListUrlBuilder()

@@ -35,6 +35,27 @@ extension EnvironmentValues {
     }
 }
 
+/// 上传者搜索导航目标 — 对齐 Android: 点击上传者 → /uploader/<name> 列表
+struct UploaderSearchDestination: Hashable {
+    let uploader: String
+}
+
+/// 上传者导航动作 — Split/三栏布局中把上传者列表推入左侧 NavigationStack
+struct UploaderNavigationAction {
+    let navigate: (String) -> Void
+}
+
+private struct UploaderNavigationActionKey: EnvironmentKey {
+    static let defaultValue: UploaderNavigationAction? = nil
+}
+
+extension EnvironmentValues {
+    var uploaderNavigationAction: UploaderNavigationAction? {
+        get { self[UploaderNavigationActionKey.self] }
+        set { self[UploaderNavigationActionKey.self] = newValue }
+    }
+}
+
 struct GalleryDetailView: View {
     let gallery: GalleryInfo
 
@@ -49,6 +70,8 @@ struct GalleryDetailView: View {
 
     /// 标签点击导航动作 — 在 Split/三栏布局中将标签列表推入左侧栏
     @Environment(\.tagNavigationAction) private var tagNavigationAction
+    /// 上传者点击导航动作 — 在 Split/三栏布局中将上传者列表推入左侧栏
+    @Environment(\.uploaderNavigationAction) private var uploaderNavigationAction
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -211,9 +234,7 @@ struct GalleryDetailView: View {
                     .lineLimit(4)
 
                 if let uploader = gallery.uploader {
-                    Text(uploader)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    uploaderButton(uploader)
                 }
 
                 Spacer(minLength: 0)
@@ -480,6 +501,33 @@ struct GalleryDetailView: View {
             }
         }
         .padding(.bottom, 12)
+    }
+
+    /// 上传者名 (可点 → /uploader/<name> 搜索，对齐 Android GalleryDetailScene)
+    @ViewBuilder
+    private func uploaderButton(_ uploader: String) -> some View {
+        if let nav = uploaderNavigationAction {
+            // iPad/macOS Split 布局: 推入左侧 content/sidebar 列的 NavigationStack
+            Button { nav.navigate(uploader) } label: { uploaderLabel(uploader) }
+                .buttonStyle(.plain)
+        } else {
+            // iPhone compact: value-based NavigationLink 推入同一 NavigationStack
+            NavigationLink(value: UploaderSearchDestination(uploader: uploader)) {
+                uploaderLabel(uploader)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func uploaderLabel(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Image(systemName: "person.crop.circle")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 
     /// 标签按钮 — Split/三栏布局: 推入左侧导航栈; iPhone compact: NavigationLink 推入当前栈

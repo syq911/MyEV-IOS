@@ -99,6 +99,10 @@ struct MainTabView: View {
                         // 标签点击推入的画廊列表 (对齐 Android: onTagClick → GalleryListScene)
                         GalleryListView(mode: .tag(keyword: dest.tag), selection: $selectedGallery)
                     }
+                    .navigationDestination(for: UploaderSearchDestination.self) { dest in
+                        // 上传者点击推入的画廊列表 (对齐 Android: 上传者 → /uploader/<name>)
+                        GalleryListView(mode: .uploader(keyword: dest.uploader), selection: $selectedGallery)
+                    }
             }
             .id(selectedTab)
             .navigationSplitViewColumnWidth(min: 350, ideal: 480)
@@ -113,6 +117,9 @@ struct MainTabView: View {
             }
             .environment(\.tagNavigationAction, TagNavigationAction { tag in
                 contentPath.append(TagSearchDestination(tag: tag))
+            })
+            .environment(\.uploaderNavigationAction, UploaderNavigationAction { uploader in
+                contentPath.append(UploaderSearchDestination(uploader: uploader))
             })
         }
         .onChange(of: selectedTab) { _, newTab in

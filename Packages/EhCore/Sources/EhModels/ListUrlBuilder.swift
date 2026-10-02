@@ -41,6 +41,24 @@ public struct ListUrlBuilder: Sendable, Codable {
 
     public static let defaultMinRating = 2
 
+    /// 语言标签表 (对齐 Android GalleryInfo.S_LANG_TAGS，顺序即语言索引，共 14 项)
+    public static let languageTags: [String] = [
+        "language:english",
+        "language:chinese",
+        "language:spanish",
+        "language:korean",
+        "language:russian",
+        "language:french",
+        "language:portuguese",
+        "language:thai",
+        "language:german",
+        "language:italian",
+        "language:vietnamese",
+        "language:polish",
+        "language:hungarian",
+        "language:dutch",
+    ]
+
     // MARK: - 属性
 
     public var mode: Mode = .normal
@@ -48,6 +66,11 @@ public struct ListUrlBuilder: Sendable, Codable {
     public var category: Int = 0  // -1 = none, 0 = default, 位掩码
     public var keyword: String?
     public var follow: String?   // topList 模式下的参数 (tl=N)
+
+    /// 语言过滤 (对齐 Android ListUrlBuilder.language)
+    /// -1 = 不限；0..(languageTags.count-1) = 语言索引。
+    /// 注意：语言不是独立的 URL 参数，而是以 `language:xxx` 前缀注入 f_search。
+    public var language: Int = -1
 
     /// -1 表示未启用
     public var advanceSearch: Int = -1
@@ -71,6 +94,7 @@ public struct ListUrlBuilder: Sendable, Codable {
         category = 0
         keyword = nil
         follow = nil
+        language = -1
         advanceSearch = -1
         minRating = -1
         pageFrom = -1
@@ -226,11 +250,20 @@ public struct ListUrlBuilder: Sendable, Codable {
                 params.append("f_cats=\((~category) & 0x3FF)")
             }
 
-            // 关键词
-            if let kw = keyword.map(Self.sanitizeKeyword), !kw.isEmpty {
-                if let encoded = kw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                    params.append("f_search=\(encoded)")
+            // 关键词 (语言过滤以 language:xxx 前缀并入 f_search，不走独立参数)
+            var effectiveKeyword = keyword.map(Self.sanitizeKeyword)
+            if language >= 0 && language < Self.languageTags.count {
+                let kw = effectiveKeyword ?? ""
+                // 关键词里已显式带语言/标签限定时不重复注入，避免双重过滤
+                let alreadyQualified = kw.contains("gid:") || kw.contains("l:") || kw.contains("language:")
+                if !alreadyQualified {
+                    let tag = Self.languageTags[language]
+                    effectiveKeyword = kw.isEmpty ? tag : "\(tag) \(kw)"
                 }
+            }
+            if let kw = effectiveKeyword, !kw.isEmpty,
+               let encoded = kw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                params.append("f_search=\(encoded)")
             }
 
             // 分页
@@ -238,8 +271,9 @@ public struct ListUrlBuilder: Sendable, Codable {
                 params.append("page=\(pageIndex)")
             }
 
-            // 高级搜索
-            if advanceSearch != -1 {
+            // 高级搜索 (对齐 Android: 有任一项才输出 advsearch=1，避免空 advsearch)
+            let advanceBits = max(advanceSearch, 0)
+            if advanceBits > 0 || minRating > 0 || pageFrom > 0 || pageTo > 0 {
                 params.append("advsearch=1")
                 let flags: [(Int, String)] = [
                     (0x001, "f_sname"), (0x002, "f_stags"), (0x004, "f_sdesc"),
@@ -247,21 +281,19 @@ public struct ListUrlBuilder: Sendable, Codable {
                     (0x040, "f_sdt2"), (0x080, "f_sh"), (0x100, "f_sfl"),
                     (0x200, "f_sfu"), (0x400, "f_sft"),
                 ]
-                for (flag, name) in flags {
-                    if advanceSearch & flag != 0 {
-                        params.append("\(name)=on")
-                    }
+                for (flag, name) in flags where advanceBits & flag != 0 {
+                    params.append("\(name)=on")
                 }
                 // 最低评分
-                if minRating != -1 {
+                if minRating > 0 {
                     params.append("f_sr=on")
                     params.append("f_srdd=\(minRating)")
                 }
                 // 页数范围
-                if pageFrom != -1 || pageTo != -1 {
+                if pageFrom > 0 || pageTo > 0 {
                     params.append("f_sp=on")
-                    params.append("f_spf=\(pageFrom != -1 ? String(pageFrom) : "")")
-                    params.append("f_spt=\(pageTo != -1 ? String(pageTo) : "")")
+                    params.append("f_spf=\(pageFrom > 0 ? String(pageFrom) : "")")
+                    params.append("f_spt=\(pageTo > 0 ? String(pageTo) : "")")
                 }
             }
 
