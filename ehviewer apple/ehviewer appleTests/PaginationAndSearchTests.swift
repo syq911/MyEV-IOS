@@ -18,6 +18,14 @@ import EhModels
 import EhParser
 @testable import ehviewer_apple
 
+// PlatformImage = UIImage(iOS) / NSImage(macOS)，其 size / images 定义在各自 UI 框架里，
+// 必须按平台显式 import，否则断言里访问这些属性会报 "missing import of defining module"。
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
 struct PaginationAndSearchTests {
 
     // MARK: - 分页解析 (issue #8 问题一)
