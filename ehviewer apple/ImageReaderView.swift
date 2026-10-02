@@ -45,9 +45,11 @@ struct ImageReaderView: View {
     // 跳页输入
     @State private var showJumpPageAlert = false
     @State private var jumpPageText = ""
-    /// 进度条拖动中的本地值 —— 松手才提交给 ViewModel
+    /// 进度条拖动中的本地值 —— 用于页码标签实时跟随
     @State private var isSeeking = false
     @State private var seekValue: Double = 0
+    /// 拖动中已经提交过的整数页 —— 只在跨过整数页时提交，避免逐像素写 @Observable
+    @State private var lastAppliedSeekPage: Int = -1
 
     // 从设置读取
     @State private var readingDirection: ReadingDirection = .topToBottom
@@ -564,6 +566,22 @@ struct ImageReaderView: View {
         if vm.isDoublePageEnabled {
             vm.syncSpreadIndex()
         }
+        Task { await vm.onPageChange(target) }
+    }
+
+    /// 进度条跳页的统一入口 —— 拖动中的实时提交与松手兜底共用。
+    /// 与 `goToPage` 的区别：这里不 clamp（越界直接忽略），并同步
+    /// `lazyCurrentPage`（横向 scrollPosition）与 `verticalScrollPage`（纵向滚动）
+    /// 两条滚动通道，保证两种阅读模式都能实时跳到目标页。
+    private func applySeekTarget(_ target: Int) {
+        guard target >= 0, target < vm.totalPages else { return }
+        let changed = vm.currentPage != target
+        vm.currentPage = target
+        vm.lazyCurrentPage = target
+        vm.verticalScrollPage = target
+        if vm.isDoublePageEnabled { vm.syncSpreadIndex() }
+        // 目标页未变化 → 不重复调度预加载
+        guard changed else { return }
         Task { await vm.onPageChange(target) }
     }
 
@@ -1327,9 +1345,9 @@ struct ImageReaderView: View {
                 }
                 .disabled(vm.currentPage == 0)
 
-                // 拖动期间只更新本地 state，不碰 vm.currentPage。
-                // currentPage 是 @Observable，每动一像素写一次会让整个阅读器
-                // (ScrollView + 所有页视图) 重新求值 —— 这正是拖进度条卡顿的原因。
+                // 拖动期间：页码标签跟随本地值，且每逢整数页变化立即跳页（实时翻页）。
+                // currentPage 是 @Observable，不能逐像素写；这里只在跨过整数页时提交，
+                // 一次完整拖动最多提交「跨过的页数」次，性能顾虑不成立。
                 Slider(
                     value: Binding(
                         get: { isSeeking ? seekValue : Double(vm.currentPage) },
@@ -1338,6 +1356,13 @@ struct ImageReaderView: View {
                         set: { newValue in
                             isSeeking = true
                             seekValue = newValue
+                            // ★ 实时提交：目标整数页变化 → 立即跳页，不等松手
+                            let target = Int(newValue.rounded())
+                            if target != lastAppliedSeekPage,
+                               target >= 0, target < vm.totalPages {
+                                lastAppliedSeekPage = target
+                                applySeekTarget(target)
+                            }
                         }
                     ),
                     in: 0...Double(max(vm.totalPages - 1, 1)),
@@ -1346,13 +1371,8 @@ struct ImageReaderView: View {
                     guard !editing else { return }
                     isSeeking = false
                     let target = Int(seekValue.rounded())
-                    guard target != vm.currentPage,
-                          target >= 0, target < vm.totalPages else { return }
-                    vm.currentPage = target
-                    vm.lazyCurrentPage = target
-                    vm.verticalScrollPage = target
-                    if vm.isDoublePageEnabled { vm.syncSpreadIndex() }
-                    Task { await vm.onPageChange(target) }
+                    applySeekTarget(target) // 兜底（目标已提交时为幂等空操作）
+                    lastAppliedSeekPage = -1
                 }
                 .tint(.white)
 
