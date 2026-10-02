@@ -258,13 +258,19 @@ public actor SpiderQueen {
                 // 2. 获取图片 URL
                 let imageUrl: String
                 let originImageUrl: String?
-                if showKey == nil {
+                // ★ 下载模式统一走 GET 页面请求（对齐 1.4.1 计划 P1-C）：
+                //   POST showpage 在 EhBackgroundTransport 里只能回落到**前台**会话
+                //   （后台会话的 downloadTask 不支持 request body），App 挂起时若所有
+                //   worker 恰好都卡在 POST 上就没有任何在途后台任务，系统失去唤醒理由，
+                //   整条下载管线会假死到用户手动打开 App。GET 走后台会话（nsurlsessiond），
+                //   随挂起继续传输，从此下载模式 100% 由系统进程托管。
+                //   阅读模式保持原有 showpage API：前台交互，省一次 HTML 下载。
+                if mode == .download || showKey == nil {
                     let result = try await fetchPageHtml(gid: galleryInfo.gid, index: index, pToken: pToken)
-                    showKey = result.showKey
+                    if let newShowKey = result.showKey { showKey = newShowKey }
                     imageUrl = result.imageUrl
                     originImageUrl = result.originImageUrl
                 } else {
-                    // showKey is guaranteed non-nil here
                     let currentShowKey = showKey ?? ""
                     let result = try await fetchPageApi(
                         gid: galleryInfo.gid,
