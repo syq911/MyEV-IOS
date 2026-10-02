@@ -29,6 +29,14 @@ import Foundation
 import FoundationNetworking
 #endif
 import EhSettings
+#if canImport(os)
+import os
+#endif
+
+/// 后台传输诊断日志 —— Console.app 连 iPhone 过滤 subsystem 可见。
+/// 用途：确认「锁屏 / 切后台后传输仍在推进」——看到周期性「后台传输完成」即说明
+/// nsurlsessiond 在替我们干活，且系统唤醒循环正常。
+private let transportLog = Logger(subsystem: "Stellatrix.ehviewer-apple", category: "BgTransport")
 
 public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
 
@@ -141,6 +149,9 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
                     continuation.resume(throwing: CancellationError())
                 } else {
                     task.resume()
+                    if let context {
+                        transportLog.debug("发起后台传输 gid=\(context.gid) page=\(context.page ?? -1)")
+                    }
                 }
             }
         } onCancel: {
@@ -153,6 +164,7 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
         lock.lock()
         backgroundCompletionHandler = handler
         lock.unlock()
+        transportLog.info("系统唤醒 App 处理后台会话事件（后台下载循环推进中）")
         // ★ 必须触碰一次 session：系统在后台唤醒 App 时，需要 App 用同一个 identifier
         //   重建会话，否则事件不会被投递、completionHandler 永远不会被调用（App 会被杀）
         _ = _session
@@ -227,15 +239,19 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
         didFinishDownloadingTo location: URL
     ) {
         guard let id = Self.taskID(of: downloadTask),
-              let continuation = takeContinuation(id),
+              let (continuation, context) = takeContinuation(id),
               let response = downloadTask.response else {
             // 无法识别的任务（进程重启后的孤儿）→ 丢弃临时文件
+            transportLog.debug("丢弃无法识别的后台任务产物（进程重启后的孤儿）")
             try? FileManager.default.removeItem(at: location)
             return
         }
         do {
             let data = try Data(contentsOf: location)
             try? FileManager.default.removeItem(at: location)
+            if let context {
+                transportLog.info("后台传输完成 gid=\(context.gid) page=\(context.page ?? -1) bytes=\(data.count)")
+            }
             continuation.resume(returning: (data, response))
         } catch {
             try? FileManager.default.removeItem(at: location)
@@ -245,7 +261,10 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else { return }   // 成功路径已在 didFinishDownloadingTo 处理
-        guard let id = Self.taskID(of: task), let continuation = takeContinuation(id) else { return }
+        guard let id = Self.taskID(of: task), let (continuation, context) = takeContinuation(id) else { return }
+        if let context {
+            transportLog.debug("后台传输失败 gid=\(context.gid) page=\(context.page ?? -1): \(error.localizedDescription, privacy: .public)")
+        }
         continuation.resume(throwing: error)
     }
 
@@ -278,19 +297,23 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
         backgroundCompletionHandler = nil
         lock.unlock()
         guard let handler else { return }
+        transportLog.info("后台会话事件处理完毕，交还 completionHandler")
         DispatchQueue.main.async { handler() }
     }
 
     // MARK: - 内部工具
 
-    private func takeContinuation(_ id: String) -> CheckedContinuation<(Data, URLResponse), Error>? {
+    private func takeContinuation(
+        _ id: String
+    ) -> (CheckedContinuation<(Data, URLResponse), Error>, TaskContext?)? {
         lock.lock()
         defer { lock.unlock() }
         taskByID.removeValue(forKey: id)
-        contextByID.removeValue(forKey: id)
+        let context = contextByID.removeValue(forKey: id)
         lastProgressAt.removeValue(forKey: id)
         cancelledIDs.remove(id)
-        return continuations.removeValue(forKey: id)
+        guard let continuation = continuations.removeValue(forKey: id) else { return nil }
+        return (continuation, context)
     }
 
     /// 取消一个在途任务：continuation 还没建立时先记账，等创建后立即取消

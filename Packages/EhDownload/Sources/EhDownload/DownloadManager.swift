@@ -6,6 +6,13 @@ import EhBackgroundTransport
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(os)
+import os
+#endif
+
+/// 后台下载诊断日志 —— 用 Console.app 连 iPhone 过滤 subsystem 即可观察
+/// 「切后台后传输是否仍在推进」。关键路径用 .info，细节用 .debug。
+private let bgLog = Logger(subsystem: "Stellatrix.ehviewer-apple", category: "Download")
 
 // MARK: - DownloadManager (对应 Android DownloadManager.java)
 // 下载队列管理 Actor
@@ -327,29 +334,17 @@ public actor DownloadManager {
 
     // MARK: - 后台任务支持
 
-    /// 暂停当前活跃下载 (用于后台任务过期时, 保留 stateWait 以便恢复)
-    public func pauseActiveIfNeeded() {
-        guard let task = activeTask else { return }
-        if let spider = spider(forGid: task.gallery.gid) {
-            Task { await spider.cancelAll() }
-        }
-        EhBackgroundTransport.shared.cancelTasks(gid: task.gallery.gid)
-        if let index = downloadQueue.firstIndex(where: { $0.gallery.gid == task.gallery.gid }) {
-            downloadQueue[index].state = Self.stateWait
-            downloadQueue[index].spider = nil
-            try? EhDatabase.shared.updateDownloadState(gid: task.gallery.gid, state: Self.stateWait)
-        }
-        runningGid = nil
-        activeTask = nil
-        isRunning = false
-    }
-
-    /// 恢复队列处理 (用于 BGProcessingTask 唤醒时)
+    /// 恢复队列处理（App 冷启动 / BGProcessingTask 唤醒时调用）
+    ///
+    /// 用 `activeTask == nil` 判定而不是 `isRunning`：后者在异常中断路径上可能残留 true，
+    /// 会让队列永远卡死（与 resumeDownload / kickQueue 保持同一套判定）。
     public func resumeAllWaiting() {
-        guard !isRunning else { return }
-        if downloadQueue.contains(where: { $0.state == Self.stateWait }) {
-            processQueue()
-        }
+        guard activeTask == nil else { return }
+        guard downloadQueue.contains(where: { $0.state == Self.stateWait }) else { return }
+        runningGid = nil
+        isRunning = false
+        bgLog.info("恢复等待中的下载队列")
+        processQueue()
     }
 
     // MARK: - 队列处理
@@ -382,11 +377,21 @@ public actor DownloadManager {
 
     // MARK: - 后台任务句柄 (iOS: 申请后台执行时间; 其他平台 no-op)
 
+    /// iOS: 申请后台执行时间 —— 只为抢下「切后台头 ~30 秒」的全速下载窗口。
+    ///
+    /// ★ 过期处理器里**绝不能再暂停下载**：
+    ///   ~30 秒到期只意味着进程即将被系统挂起，而传输是由
+    ///   `URLSessionConfiguration.background`（系统进程 nsurlsessiond）托管的，
+    ///   挂起 / 锁屏后照样继续传；任务完成时系统会唤醒 App 推进下一批，
+    ///   这个「唤醒 → 发一批 → 再挂起」的循环可以一直自我维持。
+    ///   以前这里调 pauseActiveIfNeeded()，等于在挂起前亲手取消全部在途传输
+    ///   并把状态刷成「等待中」，用户看到的就是「切后台几秒后下载停了」。
     private func beginBackgroundTask() async -> Int {
         #if canImport(UIKit)
         let identifier = await MainActor.run {
             UIApplication.shared.beginBackgroundTask(withName: "EhGalleryDownload") {
-                Task { await DownloadManager.shared.pauseActiveIfNeeded() }
+                // 什么都不做，让进程正常挂起，交给后台会话 + 系统唤醒循环接力。
+                bgLog.info("后台执行时间到期，进程即将挂起；传输交由 URLSession background 继续")
             }
         }
         return identifier.rawValue
@@ -482,6 +487,7 @@ public actor DownloadManager {
         await spider.setDelegate(updater)
 
         // 开始下载所有页面 (startDownload() 是真正的 async，会等待全部页面完成)
+        bgLog.info("管线启动 gid=\(gid) 待下载=\(gallery.pages - initialDownloaded)/\(gallery.pages) 页")
         await spider.startDownload()
 
         // 下载完成后更新 .ehviewer 文件
@@ -511,6 +517,11 @@ public actor DownloadManager {
         downloadQueue[finalIndex].downloadedPages = finishedCount
         downloadQueue[finalIndex].spider = nil  // 释放 spider 引用
         try? EhDatabase.shared.updateDownloadState(gid: gallery.gid, state: downloadQueue[finalIndex].state)
+        if success {
+            bgLog.info("管线结束 gid=\(gid) 全部完成 \(finishedCount)/\(gallery.pages) 页")
+        } else {
+            bgLog.error("管线结束 gid=\(gid) 未完成 \(finishedCount)/\(gallery.pages) 页")
+        }
 
         // 通知监听器下载完成
         await listener?.onDownloadFinish(gid: gallery.gid, title: gallery.bestTitle, success: success)
