@@ -159,6 +159,9 @@ class ReaderViewModel {
     /// 上一次预加载的锚点页 —— 用来推断翻页方向
     @ObservationIgnored private var lastPreloadAnchor: Int?
     @ObservationIgnored private var downloadDir: URL?
+    /// 页码 → 本地文件 URL 的映射 —— 已下载画廊一次性枚举建立 (1.4.1 计划 P2-D)
+    /// 省掉每页最多 4 次 fileExists 的 stat 开销；miss 时仍回退 SpiderInfoFile 逐扩展名探测
+    @ObservationIgnored private var localFileURLs: [Int: URL] = [:]
 
     /// NSCache composite key: "gid:pageIndex" — 防止切换画廊时命中旧画廊的图片缓存
     private func cacheKey(for page: Int) -> NSString {
@@ -203,6 +206,17 @@ class ReaderViewModel {
         cache.countLimit = min(40, cacheLimitMB / 5) // 每张约 5MB 估算
         return cache
     }()
+
+    /// 本地已下载画廊的预取窗口 —— 纯磁盘读取，无网络压力，
+    /// 一次铺满 20 页，做到「打开即载、翻页立刻可见」(1.4.1 计划 P2-B)。
+    /// 在线画廊仍走设备预算 (platformPreloadBudget)，不能拿 20 个并发去锤 EH。
+    /// nonisolated: 常量，单元测试需在非 MainActor 上下文读取。
+    nonisolated static let localPreloadPages = 20
+
+    /// cachedImages 这层的常驻解码字节上限 —— NSCache 的 costLimit 只能约束缓存自身，
+    /// 管不住 Observable 字典持有的引用。长条漫单页降采样后仍可达 40MB，
+    /// 20 页窗口叠起来足以触发 Jetsam (1.4.1 计划 P2-C)。
+    nonisolated private static let retainedCostLimit = 350 * 1024 * 1024
 
     /// 降采样解码: 用 ImageIO 在解码阶段限制像素尺寸，而非先全量解码再缩放
     /// 一张 15000×20000 JPEG 全量解码 = 1.2GB; 降采样到 4096px 宽 ≈ 40MB
@@ -263,6 +277,62 @@ class ReaderViewModel {
         #else
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         #endif
+    }
+
+    /// 本地图片解码 —— 直接从文件映射读取，不经过 URLSession / Data 中转
+    ///
+    /// 1.4.1 计划 P2-A: 与 `downsampledImage(data:)` 的关键区别是不把整个文件读进内存
+    /// （`CGImageSourceCreateWithURL` 走 mmap）。GIF 仍保留全部帧。
+    /// 非 private 是为了让单元测试直接验证解码分支（见 PaginationAndSearchTests）。
+    nonisolated static func decodeLocalImage(at fileURL: URL) -> PlatformImage? {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, options as CFDictionary) else {
+            return nil
+        }
+
+        // GIF 动画: 多帧必须整体解码, 缩略图接口只取第一帧
+        if CGImageSourceGetCount(source) > 1 {
+            return PlatformImage(contentsOfFile: fileURL.path)
+        }
+
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? CGFloat else {
+            return PlatformImage(contentsOfFile: fileURL.path)
+        }
+
+        // 超大图降采样, 安全范围内按原尺寸解码 (与 downsampledImage 同策略)
+        let targetSize = min(max(pixelWidth, pixelHeight), maxDecodePixelSize)
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: targetSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary) else {
+            return PlatformImage(contentsOfFile: fileURL.path)
+        }
+        #if os(iOS)
+        return UIImage(cgImage: cgImage)
+        #else
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        #endif
+    }
+
+    /// 一次性枚举下载目录, 建立「页码 → 文件 URL」映射 (1.4.1 计划 P2-D)
+    /// 下载文件命名为 8 位十进制页码 + 扩展名, 如 `00000001.jpg`
+    /// 非 private 是为了让单元测试直接验证命名解析。
+    nonisolated static func scanLocalImageURLs(in directory: URL) -> [Int: URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        var result: [Int: URL] = [:]
+        for name in names {
+            let nsName = name as NSString
+            guard ["jpg", "png", "gif", "webp"].contains(nsName.pathExtension.lowercased()) else { continue }
+            let stem = nsName.deletingPathExtension
+            guard stem.count == 8, let pageNumber = Int(stem), pageNumber >= 1 else { continue }
+            result[pageNumber - 1] = directory.appendingPathComponent(name)
+        }
+        return result
     }
 
     /// 计算解码后图片的实际像素内存占用 (bytes)
@@ -437,16 +507,45 @@ class ReaderViewModel {
         let radius = retentionRadius
         let lo = max(0, page - radius)
         let hi = min(max(0, totalPages - 1), page + radius)
-        let keepRange = lo...hi
+        // max(lo, hi): page 越界(理论上不该发生)时避免构造非法区间崩溃
+        let keepRange = lo...max(lo, hi)
 
         // 先只挑出要删的 key —— 不整份拷贝字典。
         // 大画廊里 cachedImages 可能有几十项，每次翻页都拷一遍是白花的开销。
         let doomed = cachedImages.keys.filter { !keepRange.contains($0) }
-        guard !doomed.isEmpty else { return }
 
         // 图片本体仍在 NSCache 里，这里只是把它移出 Observable 层，
         // 回头翻回来由 restoreCachedImages 直接取回，不需要重新下载。
         for p in doomed {
+            cachedImages.removeValue(forKey: p)
+        }
+
+        // 页数窗口之外再补一道字节预算 —— 长条漫单页可达 40MB，
+        // 只看页数不足以守住内存 (1.4.1 计划 P2-C)
+        enforceRetainedCostBudget(around: page)
+    }
+
+    /// 常驻解码字节超限时，从离当前页最远的开始逐出（至少保住当前页 ±2）
+    ///
+    /// `evictDistantPages` 只按页数距离淘汰，不看单页大小；本地画廊一次预取 20 页时，
+    /// 若碰上长条漫（每页降采样后仍达几十 MB），页数窗口内也足以触发 Jetsam。
+    private func enforceRetainedCostBudget(around page: Int) {
+        var total = 0
+        for image in cachedImages.values {
+            total += Self.decodedCost(of: image)
+        }
+        guard total > Self.retainedCostLimit else { return }
+
+        let lower = max(0, page - 2)
+        let upper = min(max(lower, totalPages - 1), page + 2)
+        let protectedPages = Set(lower...upper)
+
+        // ★ 必须先物化成数组再删：边遍历 keys 视图边改字典是未定义行为
+        //   （搜索触底闪退就是同类问题，见 PaginationAndSearchTests）
+        for p in cachedImages.keys.sorted(by: { abs($0 - page) > abs($1 - page) }) {
+            if total <= Self.retainedCostLimit { break }
+            guard !protectedPages.contains(p), let image = cachedImages[p] else { continue }
+            total -= Self.decodedCost(of: image)
             cachedImages.removeValue(forKey: p)
         }
     }
@@ -458,8 +557,10 @@ class ReaderViewModel {
         let radius = retentionRadius
         let lo = max(0, page - radius)
         let hi = min(max(0, totalPages - 1), page + radius)
+        // max(lo, hi): page 越界(理论上不该发生)时避免构造非法区间崩溃
+        let restoreRange = lo...max(lo, hi)
         var restored = false
-        for p in lo...hi {
+        for p in restoreRange {
             if cachedImages[p] == nil {
                 let key = cacheKey(for: p)
                 if let img = Self.imageCache.object(forKey: key) {
@@ -470,6 +571,8 @@ class ReaderViewModel {
         }
         if restored {
             debugLog("[Reader] Restored cached images around page \(page)")
+            // 恢复同样受字节预算约束（长条漫 20 页窗口可能超限）
+            enforceRetainedCostBudget(around: page)
         }
     }
 
@@ -535,6 +638,7 @@ class ReaderViewModel {
         loadingPages.removeAll()
         downloadingImages.removeAll()
         downloadDir = nil
+        localFileURLs.removeAll()
     }
 
     // MARK: - Setup (Fix D-1, B-1: 从 DownloadManager 查询真实下载状态，不再信任调用方传入的 Bool)
@@ -549,6 +653,8 @@ class ReaderViewModel {
         let dir = await DownloadManager.shared.localGalleryDirectory(gid: gid)
         self.downloadDir = dir
         self.isDownloaded = dir != nil
+        // 目录枚举一次，建立页码 → 文件 URL 映射（1.4.1 计划 P2-D）
+        self.localFileURLs = dir.map { Self.scanLocalImageURLs(in: $0) } ?? [:]
     }
 
     func extractPTokens(from previewSet: PreviewSet) {
@@ -648,6 +754,34 @@ class ReaderViewModel {
         }
     }
 
+    /// 本地已下载页的快速加载 —— 纯磁盘 + ImageIO 解码，不走 URLSession
+    ///
+    /// 1.4.1 计划 P2-A：本地文件没有"下载"这回事，不需要进度 UI、Referer、UA、
+    /// H@H 换节点、EhAPI 回退那一整套网络管线。解码失败就报错，由用户手动重试。
+    private func loadLocalImage(index: Int, fileURL: URL) async {
+        let image = await Task.detached(priority: .userInitiated) {
+            Self.decodeLocalImage(at: fileURL)
+        }.value
+
+        guard let image else {
+            await MainActor.run {
+                self.errorPages.insert(index)
+                self.errorMessages[index] = "本地图片读取失败"
+                self.downloadProgress.removeValue(forKey: index)
+            }
+            return
+        }
+
+        let cost = Self.decodedCost(of: image)
+        Self.imageCache.setObject(image, forKey: self.cacheKey(for: index), cost: cost)
+        await MainActor.run {
+            self.cachedImages[index] = image
+            self.errorPages.remove(index)
+            self.downloadProgress.removeValue(forKey: index)
+            self.evictDistantPages(from: self.currentPage)
+        }
+    }
+
     /// 下载图片数据到 NSCache，带进度追踪
     func downloadImageData(_ index: Int) async {
         // 已缓存 → 直接提升到 Observable 层 (使用 gid:page 复合 key)
@@ -662,10 +796,20 @@ class ReaderViewModel {
         }
         guard let urlString = imageURLs[index], let initialURL = URL(string: urlString) else { return }
         guard !downloadingImages.contains(index) else { return }
-        // 可变: 换 H@H 节点后 URL 会变 (对齐 Android SpiderQueen 的 nl= 重试)
-        var url = initialURL
         downloadingImages.insert(index)
         defer { downloadingImages.remove(index) }
+
+        // ★ 本地文件快速路径 (1.4.1 计划 P2-A):
+        //   以前本地 file:// 也被塞进 URLSession.bytes 逐字节迭代，每页都要等
+        //   「下载图片中 xx%」的伪进度跑完才解码 —— 用户看到的就是"已下载的漫画
+        //   每幅画还得先加载再显示"。这里直接走 ImageIO 映射读取 + 解码。
+        if initialURL.isFileURL {
+            await loadLocalImage(index: index, fileURL: initialURL)
+            return
+        }
+
+        // 可变: 换 H@H 节点后 URL 会变 (对齐 Android SpiderQueen 的 nl= 重试)
+        var url = initialURL
 
         // 立即设置初始进度 0，让 UI 渲染圆形进度条而非纯 spinner
         await MainActor.run {
@@ -915,7 +1059,9 @@ class ReaderViewModel {
 
         // 优先本地 (Fix D-1: 通过 DownloadManager 统一路径，本地找不到时回退网络)
         if isDownloaded, let dir = downloadDir {
-            if let localURL = SpiderInfoFile.getLocalImageURL(in: dir, pageIndex: index) {
+            // 先查一次性建立的映射 (P2-D)，miss 再逐扩展名探测 —— 覆盖阅读中正好下载完成的页
+            if let localURL = localFileURLs[index] ?? SpiderInfoFile.getLocalImageURL(in: dir, pageIndex: index) {
+                localFileURLs[index] = localURL
                 await MainActor.run {
                     self.imageURLs[index] = localURL.absoluteString
                     self.errorPages.remove(index)
@@ -1026,7 +1172,26 @@ class ReaderViewModel {
     /// 需要常驻 Observable 层的页数 —— 必须 ≥ 预加载窗口，
     /// 否则刚预加载好的页会被 evictDistantPages 立刻扔掉，来回空转
     var retentionRadius: Int {
-        max(5, effectivePreloadCount + 2)
+        // 本地画廊窗口是 20 页，常驻范围必须跟着放大，否则预取完立刻被淘汰
+        isDownloaded ? Self.localPreloadPages + 4 : max(5, effectivePreloadCount + 2)
+    }
+
+    /// 预取窗口计算 —— 纯函数，便于回归测试 (1.4.1 计划 P2-B/P2-D)
+    ///
+    /// - 本地已下载画廊: 固定 20 页前向窗口 + 3 页回看余量（纯磁盘读取，无网络压力）
+    /// - 在线画廊: 设备预算 + 阅读方向倾斜，不能拿 20 个并发去锤 EH
+    nonisolated static func preloadWindow(
+        isDownloaded: Bool,
+        budget: Int,
+        forward: Bool
+    ) -> (ahead: Int, behind: Int) {
+        if isDownloaded {
+            return (localPreloadPages, 3)
+        }
+        return (
+            forward ? budget : max(1, budget / 3),
+            forward ? max(1, budget / 4) : budget
+        )
     }
 
     /// 预加载 —— 方向感知 + 由近及远
@@ -1036,13 +1201,18 @@ class ReaderViewModel {
     ///   2. 按距离排序后分批发出，保证「下一页」永远排在「下五页」前面拿到带宽
     ///   3. 每批之间检查取消，快速连翻时上一轮会被立刻中止
     func preload(around page: Int) async {
-        let budget = effectivePreloadCount
         let forward = lastPreloadAnchor.map { page >= $0 } ?? true
         lastPreloadAnchor = page
 
-        // 顺着阅读方向多铺，逆向只留少量回看余量
-        let ahead = forward ? budget : max(1, budget / 3)
-        let behind = forward ? max(1, budget / 4) : budget
+        let window = Self.preloadWindow(
+            isDownloaded: isDownloaded,
+            budget: effectivePreloadCount,
+            forward: forward
+        )
+        let ahead = window.ahead
+        let behind = window.behind
+        // 本地画廊是纯磁盘 + 解码，批次可以大一些；在线画廊仍按小批推进
+        let batchSize = isDownloaded ? 5 : 3
 
         let lo = max(0, page - behind)
         let hi = min(totalPages - 1, page + ahead)
@@ -1060,7 +1230,6 @@ class ReaderViewModel {
 
         // 分批而不是一次性全丢进 TaskGroup:
         // 全量并发时第 6 页可能比第 1 页先回来，用户等的恰恰是第 1 页
-        let batchSize = 3
         for chunk in stride(from: 0, to: candidates.count, by: batchSize) {
             if Task.isCancelled { return }
             let batch = candidates[chunk..<min(chunk + batchSize, candidates.count)]
