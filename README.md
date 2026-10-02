@@ -77,6 +77,19 @@ DMG 已用 Developer ID 签名并通过 Apple 公证，票据已植入，断网�
 > 没有 Mac 也能装：Sideloadly 和 AltStore 都有 Windows 版本，签名在你自己的电脑上完成。
 > 只有从源码编译才需要 macOS。
 
+#### 用 AltStore / SideStore 源自动更新（推荐）
+
+添加一次源地址，之后新版本会自动出现在 AltStore 的「更新」里，用你自己的证书重签安装，
+不必每次来 GitHub 手动下载：
+
+```
+https://github.com/syq911/MyEV-IOS/releases/latest/download/source.json
+```
+
+- 在 AltStore / SideStore 的 **Sources → 添加源** 里粘贴上面的地址即可。
+- 该源清单随每次发布自动更新，并列出全部历史版本。
+- 当前构建最低系统版本为 **iOS 26.2**（每个版本的实际要求以源清单中标注为准）。
+
 ---
 
 ## 功能

@@ -172,3 +172,22 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/EhViewer.ipa \
             --title "EhViewer ${GITHUB_REF_NAME} (定制版)" \
             --notes "无签名 ipa，请用 AltStore / Sideloadly 自行重签安装。详见 CHANGELOG.md。"
+
+      # 生成 AltStore / SideStore 源清单，作为本次 Release 的附件上传。
+      # 对外统一地址（加进 AltStore 后即可自动检查更新）：
+      #   https://github.com/<owner>/<repo>/releases/latest/download/source.json
+      # 必须放在 create release 之后——脚本要能扫到刚发布的这个版本。
+      - name: Build AltStore source (source.json)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/build_altstore_source.py
+          python3 -c "import json;d=json.load(open('source.json'));print('source.json 版本:',[v['version'] for v in d['apps'][0]['versions']])"
+
+      - name: Upload source.json to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" source.json --clobber
