@@ -629,20 +629,6 @@ struct SettingsView: View {
                 set: { AppSettings.shared.showPageInterval = $0 }
             ))
 
-            #if DEBUG && os(iOS)
-            Toggle("音量键翻页", isOn: Binding(
-                get: { AppSettings.shared.volumePage },
-                set: { AppSettings.shared.volumePage = $0 }
-            ))
-
-            if AppSettings.shared.volumePage {
-                Toggle("反转音量键方向", isOn: Binding(
-                    get: { AppSettings.shared.reverseVolumePage },
-                    set: { AppSettings.shared.reverseVolumePage = $0 }
-                ))
-            }
-            #endif
-
             // 自定义亮度 (对齐 Android Settings.KEY_CUSTOM_SCREEN_LIGHTNESS)
             Toggle("自定义亮度", isOn: Binding(
                 get: { AppSettings.shared.customScreenLightness },

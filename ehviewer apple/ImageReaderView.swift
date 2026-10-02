@@ -218,6 +218,17 @@ struct ImageReaderView: View {
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
         }
+        // 阅读设置里开关「音量键翻页」→ 当场生效，不用退出阅读器重进
+        .onChange(of: AppSettings.shared.volumePage) { _, enabled in
+            if enabled {
+                volumePageTurner.start(
+                    onNext: { goToNextPage() },
+                    onPrevious: { goToPreviousPage() }
+                )
+            } else {
+                volumePageTurner.stop()
+            }
+        }
         #else
         .focusable()
         .focused($isReaderFocused)
@@ -1556,6 +1567,23 @@ struct ReaderSettingsSheet: View {
                         get: { AppSettings.shared.readingFullscreen },
                         set: { AppSettings.shared.readingFullscreen = $0 }
                     ))
+
+                    #if os(iOS)
+                    Toggle("音量键翻页", isOn: Binding(
+                        get: { AppSettings.shared.volumePage },
+                        set: { AppSettings.shared.volumePage = $0 }
+                    ))
+
+                    if AppSettings.shared.volumePage {
+                        Toggle("反转音量键方向", isOn: Binding(
+                            get: { AppSettings.shared.reverseVolumePage },
+                            set: { AppSettings.shared.reverseVolumePage = $0 }
+                        ))
+                        Text("默认音量 + 上一页、音量 − 下一页；连接部分蓝牙音频设备时可能失效。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    #endif
 
                     #if os(iOS)
                     Toggle("自定义亮度", isOn: Binding(
