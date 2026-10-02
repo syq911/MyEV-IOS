@@ -38,16 +38,37 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
     private static let sessionIdentifier = "Stellatrix.ehviewer-apple.download.v1"
     /// 任务识别头
     private static let taskHeader = "X-Eh-Task"
+    /// 字节进度的最小上报间隔
+    private static let progressInterval: TimeInterval = 0.5
+
+    /// 任务上下文 —— 把一次网络传输与 (画廊, 页) 关联起来。
+    /// 暂停 / 删除下载时据此精确取消属于该画廊的在途任务（SpiderQueen 的
+    /// TaskGroup 子任务不在其 activeTasks 里，只能靠这个注册表定位）。
+    public struct TaskContext: Sendable, Equatable {
+        public let gid: Int64
+        public let page: Int?
+
+        public init(gid: Int64, page: Int? = nil) {
+            self.gid = gid
+            self.page = page
+        }
+    }
 
     private let lock = NSLock()
     /// taskID → 等待中的 continuation
     private var continuations: [String: CheckedContinuation<(Data, URLResponse), Error>] = [:]
     /// taskID → 底层 URLSession 任务（取消时用）
     private var taskByID: [String: URLSessionTask] = [:]
+    /// taskID → 任务上下文（暂停 / 删除下载时按 gid 定位在途任务）
+    private var contextByID: [String: TaskContext] = [:]
+    /// taskID → 上次进度上报时间（节流）
+    private var lastProgressAt: [String: TimeInterval] = [:]
     /// 取消先于任务创建到达时，把 id 记下来，创建后立即取消
     private var cancelledIDs: Set<String> = []
     /// 系统交给我们的后台会话事件处理完成回调
     private var backgroundCompletionHandler: (() -> Void)?
+    /// 字节进度回调（已按 500ms 节流，任意线程触发）
+    private var _progressHandler: (@Sendable (TaskContext, Int64, Int64) -> Void)?
 
     private var _session: URLSession!
     private var _foregroundSession: URLSession!
@@ -82,7 +103,11 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
 
     // MARK: - 对外接口（与 URLSession.data(for:) 同签名）
 
-    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+    /// - Parameter context: 可选的 (画廊, 页) 上下文；暂停 / 删除下载时据此取消在途任务
+    public func data(
+        for request: URLRequest,
+        context: TaskContext? = nil
+    ) async throws -> (Data, URLResponse) {
         // ① background 的 downloadTask 不支持 request body → POST / 带 body 回落前台
         if request.httpBody != nil || request.httpBodyStream != nil {
             return try await _foregroundSession.data(for: request)
@@ -100,12 +125,14 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 continuations[taskID] = continuation
+                if let context { contextByID[taskID] = context }
                 let task = _session.downloadTask(with: req)
                 taskByID[taskID] = task
                 let cancelledBeforeResume = cancelledIDs.remove(taskID) != nil
                 if cancelledBeforeResume {
                     continuations.removeValue(forKey: taskID)
                     taskByID.removeValue(forKey: taskID)
+                    contextByID.removeValue(forKey: taskID)
                 }
                 lock.unlock()
 
@@ -133,8 +160,62 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
 
     /// 取消所有在途的下载任务（暂停 / 取消下载时调用）
     public func cancelAllTasks() {
+        lock.lock()
+        let waiting = continuations
+        continuations.removeAll()
+        let tasks = taskByID.values
+        taskByID.removeAll()
+        contextByID.removeAll()
+        lastProgressAt.removeAll()
+        lock.unlock()
+
+        for task in tasks { task.cancel() }
+        for (_, continuation) in waiting { continuation.resume(throwing: CancellationError()) }
+        // 兜底：清掉注册表里没有、但会话里仍残留的任务（进程重启后的孤儿）
+        _session.getAllTasks { all in
+            all.forEach { $0.cancel() }
+        }
+    }
+
+    /// 取消某个画廊所有在途的后台传输（暂停 / 删除该画廊时调用）
+    /// SpiderQueen 的 TaskGroup 子任务不在其 activeTasks 中，只能靠这里的注册表定位，
+    /// 否则「暂停下载」只会切成空转、在途传输照样跑完。
+    public func cancelTasks(gid: Int64) {
+        lock.lock()
+        let ids = contextByID.filter { $0.value.gid == gid }.map(\.key)
+        var pending: [(URLSessionTask?, CheckedContinuation<(Data, URLResponse), Error>?)] = []
+        for id in ids {
+            let task = taskByID.removeValue(forKey: id)
+            let continuation = continuations.removeValue(forKey: id)
+            contextByID.removeValue(forKey: id)
+            lastProgressAt.removeValue(forKey: id)
+            pending.append((task, continuation))
+        }
+        lock.unlock()
+
+        for (task, continuation) in pending {
+            task?.cancel()
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+
+    /// 字节级传输进度回调（已按 500ms 节流）。由下载编排层设置。
+    public var progressHandler: (@Sendable (TaskContext, Int64, Int64) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _progressHandler }
+        set { lock.lock(); _progressHandler = newValue; lock.unlock() }
+    }
+
+    /// 冷启动对账：取消带本传输层标记、但内存里已无等待者的孤儿任务
+    /// （App 被强杀后残留；真正的续传由磁盘 .ehviewer 记录驱动）
+    public func reconcileOrphanTasks() {
+        lock.lock()
+        let known = Set(continuations.keys)
+        lock.unlock()
         _session.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
+            for task in tasks {
+                guard let id = Self.taskID(of: task), !known.contains(id) else { continue }
+                task.cancel()
+            }
         }
     }
 
@@ -168,6 +249,27 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
         continuation.resume(throwing: error)
     }
 
+    /// 字节级进度 —— 节流 500ms 后交给 progressHandler（供下载列表显示实时速度）
+    public func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard let id = Self.taskID(of: downloadTask) else { return }
+        lock.lock()
+        let context = contextByID[id]
+        let handler = _progressHandler
+        let now = Date().timeIntervalSinceReferenceDate
+        let shouldReport = context != nil && now - (lastProgressAt[id] ?? 0) >= Self.progressInterval
+        if shouldReport { lastProgressAt[id] = now }
+        lock.unlock()
+
+        guard shouldReport, let context, let handler else { return }
+        handler(context, totalBytesWritten, totalBytesExpectedToWrite)
+    }
+
     public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {}
 
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -185,6 +287,8 @@ public final class EhBackgroundTransport: NSObject, URLSessionDownloadDelegate, 
         lock.lock()
         defer { lock.unlock() }
         taskByID.removeValue(forKey: id)
+        contextByID.removeValue(forKey: id)
+        lastProgressAt.removeValue(forKey: id)
         cancelledIDs.remove(id)
         return continuations.removeValue(forKey: id)
     }

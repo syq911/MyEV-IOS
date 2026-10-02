@@ -2,6 +2,7 @@ import Foundation
 import EhModels
 import EhDatabase
 import EhSpider
+import EhBackgroundTransport
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -33,6 +34,8 @@ public actor DownloadManager {
     /// 当前真正在执行的任务 gid — executeDownload 每次从 await 恢复后都要用它确认
     /// 自己是否仍然是活跃任务 (可能已被 pause/delete/pauseAll 取代)
     private var runningGid: Int64?
+    /// 字节级传输采样 gid → (时刻, 累计字节)，用于换算实时速度
+    private var transferSample: [Int64: (at: Date, bytes: Int64)] = [:]
     private let maxConcurrent = 1  // 同一时间只下载一个画廊
     private var isRunning = false
 
@@ -63,6 +66,12 @@ public actor DownloadManager {
         resourceValues.isExcludedFromBackup = true
         try? dir.setResourceValues(resourceValues)
         #endif
+
+        // 传输层字节进度（已节流 500ms）→ 换算实时速度刷进下载队列，
+        // 让下载列表 / 灵动岛在长页面传输期间也能持续跳动
+        EhBackgroundTransport.shared.progressHandler = { context, written, _ in
+            Task { await DownloadManager.shared.applyTransferProgress(gid: context.gid, written: written) }
+        }
     }
 
     /// 从数据库加载已有下载任务 (nonisolated static: 供 lazy 属性同步初始化)
@@ -146,6 +155,9 @@ public actor DownloadManager {
             if let spider = spider(forGid: gid) {
                 Task { await spider.cancelAll() }
             }
+            // ★ 直接掐断该画廊在途的后台传输（即使 spider 引用已丢失也能停住）
+            EhBackgroundTransport.shared.cancelTasks(gid: gid)
+            transferSample.removeValue(forKey: gid)
             // ★ 先失效 runningGid: 正在 await 中的 executeDownload 恢复后会自行退出，
             //   不会再把状态写回队列 (否则会覆盖这里设置的"已暂停")
             runningGid = nil
@@ -165,6 +177,9 @@ public actor DownloadManager {
         if let gid = activeTask?.gallery.gid, let spider = spider(forGid: gid) {
             Task { await spider.cancelAll() }
         }
+        // 掐断所有在途后台传输（磁盘满等紧急暂停）
+        EhBackgroundTransport.shared.cancelAllTasks()
+        transferSample.removeAll()
         runningGid = nil
         activeTask = nil
         isRunning = false
@@ -214,6 +229,8 @@ public actor DownloadManager {
             if let spider = spider(forGid: gid) {
                 Task { await spider.cancelAll() }
             }
+            EhBackgroundTransport.shared.cancelTasks(gid: gid)
+            transferSample.removeValue(forKey: gid)
             // ★ 失效 runningGid，正在执行的 executeDownload 恢复后不会再访问已删除的任务
             runningGid = nil
             activeTask = nil
@@ -288,6 +305,21 @@ public actor DownloadManager {
         }
     }
 
+    /// 传输层字节进度（已节流 500ms）→ 换算实时速度刷进队列
+    func applyTransferProgress(gid: Int64, written: Int64) {
+        guard let index = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }) else { return }
+        let now = Date()
+        guard let sample = transferSample[gid] else {
+            transferSample[gid] = (now, written)
+            return
+        }
+        let elapsed = now.timeIntervalSince(sample.at)
+        guard elapsed >= 0.4 else { return }
+        let delta = written - sample.bytes
+        if delta >= 0 { downloadQueue[index].speed = Int64(Double(delta) / elapsed) }
+        transferSample[gid] = (now, written)
+    }
+
     /// 设置下载监听器
     public func setListener(_ listener: DownloadListener?) {
         self.listener = listener
@@ -301,6 +333,7 @@ public actor DownloadManager {
         if let spider = spider(forGid: task.gallery.gid) {
             Task { await spider.cancelAll() }
         }
+        EhBackgroundTransport.shared.cancelTasks(gid: task.gallery.gid)
         if let index = downloadQueue.firstIndex(where: { $0.gallery.gid == task.gallery.gid }) {
             downloadQueue[index].state = Self.stateWait
             downloadQueue[index].spider = nil

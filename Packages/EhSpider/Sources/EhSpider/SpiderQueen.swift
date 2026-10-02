@@ -33,8 +33,10 @@ public actor SpiderQueen {
     private var activeTasks: [Int: Task<Void, Never>] = [:]
 
     /// 并发下载数 — 从 AppSettings 读取用户设置 (对齐 Android SpiderQueen.mWorkerPool 大小)
+    /// 上限与 EhRateLimiter 的全局图片并发上限 (5) 保持一致：超出的话多出来的 worker 会挂在
+    /// acquireImageSlot 的 continuation 上，而该等待不支持取消 —— 暂停时整条下载链会卡住。
     private var maxConcurrent: Int {
-        AppSettings.shared.multiThreadDownload
+        min(AppSettings.shared.multiThreadDownload, 5)
     }
 
     /// 传输层 —— 走 URLSession background (由系统进程 nsurlsessiond 托管)，
@@ -42,12 +44,20 @@ public actor SpiderQueen {
     /// POST 等带 body 的请求由传输层内部自动回落到前台会话。
     private var transport: EhBackgroundTransport { EhBackgroundTransport.shared }
 
+    /// 是否已请求停止 (暂停 / 删除下载 / 退出阅读器)。
+    /// startDownload 的 TaskGroup 子任务不在 activeTasks 里，只能靠它 + 传输层的
+    /// 按 gid 取消来真正掐断在途下载。
+    private var isStopped = false
+
     /// 在全局速率限制下发起网络请求 — 防止跨实例并发失控 (V-09)
     /// 所有 SpiderQueen 实例共享同一个 EhRateLimiter，全局最多 5 个并发图片请求
-    private func rateLimitedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+    private func rateLimitedData(
+        for request: URLRequest,
+        context: EhBackgroundTransport.TaskContext? = nil
+    ) async throws -> (Data, URLResponse) {
         await EhRateLimiter.shared.acquireImageSlot()
         do {
-            let result = try await transport.data(for: request)
+            let result = try await transport.data(for: request, context: context)
             await EhRateLimiter.shared.releaseImageSlot()
             return result
         } catch {
@@ -134,6 +144,11 @@ public actor SpiderQueen {
             var index = 0
 
             while index < pagesToDownload.count {
+                // ★ 暂停 / 删除后立刻停止派发新页面，并取消组内在途任务
+                if isStopped {
+                    group.cancelAll()
+                    break
+                }
                 if inFlight < maxConcurrent {
                     let pageIndex = pagesToDownload[index]
                     pageStates[pageIndex] = Self.stateLoading
@@ -177,12 +192,16 @@ public actor SpiderQueen {
         return await spiderDen.read(index: index)
     }
 
-    /// 取消所有任务
+    /// 取消所有任务（暂停 / 删除下载 / 退出阅读器）
+    /// ★ 必须同时掐断传输层的在途请求：startDownload 的 TaskGroup 子任务不在
+    ///   activeTasks 中，仅靠 task.cancel() 停不下已经在跑的下载。
     public func cancelAll() {
+        isStopped = true
         for (_, task) in activeTasks {
             task.cancel()
         }
         activeTasks.removeAll()
+        transport.cancelTasks(gid: galleryInfo.gid)
     }
 
     /// 设置回调代理
@@ -208,7 +227,19 @@ public actor SpiderQueen {
         let maxRetries = 5
         var lastError: Error?
 
+        // 已被暂停 / 删除 → 直接放弃这一页（保持 stateNone，恢复时重下）
+        if isStopped {
+            pageStates[index] = Self.stateNone
+            activeTasks.removeValue(forKey: index)
+            return
+        }
+
         for attempt in 0..<maxRetries {
+            if isStopped {
+                pageStates[index] = Self.stateNone
+                activeTasks.removeValue(forKey: index)
+                return
+            }
             do {
                 // 0. 检查是否已在缓存/下载目录中 (快速路径)
                 if await spiderDen.contain(index: index) {
@@ -313,7 +344,10 @@ public actor SpiderQueen {
         // 使用带 cookies 的 session 下载图片
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        let (data, response) = try await rateLimitedData(for: request)
+        let (data, response) = try await rateLimitedData(
+            for: request,
+            context: .init(gid: galleryInfo.gid, page: index)
+        )
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -396,7 +430,10 @@ public actor SpiderQueen {
         request.setValue(EhURL.referer(for: site), forHTTPHeaderField: "Referer")
         request.timeoutInterval = 15
 
-        let (data, _) = try await rateLimitedData(for: request)
+        let (data, _) = try await rateLimitedData(
+            for: request,
+            context: .init(gid: galleryInfo.gid, page: index)
+        )
         let html = String(data: data, encoding: .utf8) ?? ""
 
         // 从预览链接中提取 pTokens: /s/PTOKEN/GID-PAGE
@@ -434,7 +471,10 @@ public actor SpiderQueen {
         request.setValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
 
-        let (data, response) = try await rateLimitedData(for: request)
+        let (data, response) = try await rateLimitedData(
+            for: request,
+            context: .init(gid: galleryInfo.gid, page: index)
+        )
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -479,7 +519,10 @@ public actor SpiderQueen {
         request.httpBody = jsonData
         request.timeoutInterval = 15
 
-        let (data, response) = try await rateLimitedData(for: request)
+        let (data, response) = try await rateLimitedData(
+            for: request,
+            context: .init(gid: galleryInfo.gid, page: index)
+        )
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {

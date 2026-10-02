@@ -29,6 +29,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         // 注册后台任务
         BackgroundDownloadManager.shared.registerBackgroundTasks()
+
+        // ★ 冷启动对账 (M3):
+        //   1. 清掉上一条进程（被强杀）残留的孤儿后台任务 —— 带本传输层标记但已无等待者；
+        //   2. 恢复等待队列 —— 磁盘 .ehviewer 记录会跳过已下好的页，缺哪页补哪页。
+        //   系统在强杀 App 时会取消后台传输（Apple 明确行为），所以续传必须靠这一步。
+        BackgroundDownloadBridge.reconcileOrphanTasks()
+        Task {
+            await DownloadManager.shared.resumeAllWaiting()
+        }
         return true
     }
 
