@@ -2,6 +2,39 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.4.6-custom] - 2026-10-02
+
+> 后台下载大改：接入 iOS 26 的 **`BGContinuedProcessingTask`（持续处理任务）** ——
+> 用户点下载后**切到别的 App / 锁屏**，系统会给我们一段**确定性**的后台运行时间继续下载，
+> 并在灵动岛/锁屏显示进度卡片，而不再只依赖过去那种“机会性、几乎跑不动”的调度。
+
+### 🐞 背景（1.4.5 日志实证）
+
+1.4.5 日志里，`23:42 → 23:55` 约 13 分钟内虽然 App 被系统反复唤醒（多次 `LAUNCH`），
+但「图片下载完成」几乎为 0 —— 说明旧方案（仅靠后台 URLSession + 机会性 `BGProcessingTask`）
+在后台的实际吞吐几乎不可用。根因：下载是「逐页串行」流水线（每页先取页面 HTML 拿图片 URL，
+再下图），App 一被挂起，流水线就只能等系统零星的唤醒，iOS 还会按能量预算节流。
+
+### 🔧 改动
+
+- **接入 `BGContinuedProcessingTask`**（iOS 26+，本工程部署目标 26.2，可直接用）：
+  - `Info.plist` 的 `BGTaskSchedulerPermittedIdentifiers` 增加 `.continued`；
+  - `BackgroundDownloadManager` 注册该任务（`register`），并在**用户点下载/继续下载**时
+    提交请求（`submit`）；
+  - 任务运行期间用 1 秒轮询把「已下载页/总页数」写进 `task.progress` 并 `updateTitle`，
+    让系统卡片显示真实进度（**长期无进度的持续任务会被系统优先回收**），队列空闲后自动收尾。
+- 入口收敛在 `DownloadNotificationBridge.onDownloadStart`（下载开始回调，含续传），
+  避免重复提交；同一 identifier 同时只允许一个实例。
+- 保留原有 `BGProcessingTask` / `BGAppRefreshTask` 作为兜底。
+
+### ⚠️ 说明与限制
+
+- 持续处理任务会在系统界面（灵动岛/锁屏）显示一张进度卡片，**用户可随时取消**；
+  取消后下载会回到「后台会话 + 回前台续传」模式。
+- 仍受系统资源约束：内存紧张时可能被回收；**多任务界面把 App 划掉（强杀）**依然会停止一切后台任务
+  （Apple 明确规定：划掉 App 会取消其持续处理任务）。
+- 需在 iOS 26+ 生效；更低系统版本自动退回旧行为。
+
 ## [1.4.5-custom] - 2026-10-02
 
 > 两个体验改进：**重开 App 不再回到启动页（恢复上次标签页）**；

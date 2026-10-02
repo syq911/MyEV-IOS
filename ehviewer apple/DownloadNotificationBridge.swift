@@ -21,6 +21,13 @@ final class DownloadNotificationBridge: DownloadListener, @unchecked Sendable {
     func onDownloadStart(gid: Int64, title: String) async {
         await MainActor.run {
             #if os(iOS)
+            // iOS 26+: 登记「持续处理任务」—— 用户切到别的 App / 锁屏后，
+            // 系统仍给我们确定性的一段后台运行时间继续下载，并在灵动岛/锁屏显示进度。
+            // 这里（用户点下载 / 继续下载触发的下载开始回调）是唯一入口，避免重复提交。
+            BackgroundDownloadManager.shared.submitContinuedProcessing(
+                title: title,
+                subtitle: "正在下载…"
+            )
             // 启动灵动岛 Live Activity (替代传统通知)
             if AppSettings.shared.showLiveActivity {
                 DownloadLiveActivityManager.shared.startActivity(gid: gid, title: title)
