@@ -8,10 +8,11 @@ let package = Package(
         .macOS(.v14),
     ],
     products: [
-        .library(name: "EhNetwork", targets: ["EhAPI", "EhCookie", "EhDNS"]),
+        .library(name: "EhNetwork", targets: ["EhAPI", "EhCookie", "EhDNS", "EhBackgroundTransport"]),
         .library(name: "EhAPI", targets: ["EhAPI"]),
         .library(name: "EhCookie", targets: ["EhCookie"]),
         .library(name: "EhDNS", targets: ["EhDNS"]),
+        .library(name: "EhBackgroundTransport", targets: ["EhBackgroundTransport"]),
     ],
     dependencies: [
         .package(path: "../EhCore"),
@@ -42,6 +43,13 @@ let package = Package(
                 .product(name: "EhSettings", package: "EhCore"),
             ],
             path: "Sources/EhDNS"
+        ),
+        .target(
+            name: "EhBackgroundTransport",
+            dependencies: [
+                .product(name: "EhSettings", package: "EhCore"),
+            ],
+            path: "Sources/EhBackgroundTransport"
         ),
     ]
 )

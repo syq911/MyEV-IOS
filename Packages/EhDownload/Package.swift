@@ -13,6 +13,7 @@ let package = Package(
     dependencies: [
         .package(path: "../EhCore"),
         .package(path: "../EhSpider"),
+        .package(path: "../EhNetwork"),
     ],
     targets: [
         .target(
@@ -22,6 +23,7 @@ let package = Package(
                 .product(name: "EhDatabase", package: "EhCore"),
                 .product(name: "EhSettings", package: "EhCore"),
                 .product(name: "EhSpider", package: "EhSpider"),
+                .product(name: "EhBackgroundTransport", package: "EhNetwork"),
             ],
             path: "Sources"
         ),

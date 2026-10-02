@@ -2,6 +2,7 @@ import Foundation
 import EhModels
 import EhSettings
 import EhParser
+import EhBackgroundTransport
 
 // MARK: - SpiderQueen (对应 Android SpiderQueen.java)
 // 画廊图片加载引擎核心，使用 Swift Actor 保证线程安全
@@ -36,22 +37,17 @@ public actor SpiderQueen {
         AppSettings.shared.multiThreadDownload
     }
 
-    /// 共享 URLSession — 超时从 AppSettings 读取 (对齐 Android okhttp timeouts)
-    private let sharedSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.httpCookieStorage = .shared
-        let timeout = TimeInterval(AppSettings.shared.downloadTimeout)
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout * 4
-        return URLSession(configuration: config)
-    }()
+    /// 传输层 —— 走 URLSession background (由系统进程 nsurlsessiond 托管)，
+    /// 锁屏 / 切后台 / App 挂起时传输继续进行。详见 EhBackgroundTransport。
+    /// POST 等带 body 的请求由传输层内部自动回落到前台会话。
+    private var transport: EhBackgroundTransport { EhBackgroundTransport.shared }
 
     /// 在全局速率限制下发起网络请求 — 防止跨实例并发失控 (V-09)
     /// 所有 SpiderQueen 实例共享同一个 EhRateLimiter，全局最多 5 个并发图片请求
     private func rateLimitedData(for request: URLRequest) async throws -> (Data, URLResponse) {
         await EhRateLimiter.shared.acquireImageSlot()
         do {
-            let result = try await sharedSession.data(for: request)
+            let result = try await transport.data(for: request)
             await EhRateLimiter.shared.releaseImageSlot()
             return result
         } catch {

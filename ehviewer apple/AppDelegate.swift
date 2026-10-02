@@ -8,17 +8,19 @@
 #if os(iOS)
 import UIKit
 import EhSettings
+import EhDownload
 
 class AppDelegate: NSObject, UIApplicationDelegate {
 
     /// 后台下载完成回调
+    /// URLSession background 的传输由系统进程托管，App 被唤醒后必须把 completionHandler
+    /// 交还给会话，否则系统会认为 App 未处理事件（后续不再唤醒，甚至杀进程）。
     func application(
         _ application: UIApplication,
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        // 存储完成回调，在 URLSession delegate 中调用
-        BackgroundDownloadManager.shared.backgroundCompletionHandler = completionHandler
+        BackgroundDownloadBridge.handleBackgroundSessionCompletion(completionHandler)
     }
 
     func application(

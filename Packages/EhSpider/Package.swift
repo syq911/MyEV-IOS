@@ -22,6 +22,7 @@ let package = Package(
                 .product(name: "EhModels", package: "EhCore"),
                 .product(name: "EhSettings", package: "EhCore"),
                 .product(name: "EhAPI", package: "EhNetwork"),
+                .product(name: "EhBackgroundTransport", package: "EhNetwork"),
                 .product(name: "EhParser", package: "EhParser"),
             ],
             path: "Sources"
