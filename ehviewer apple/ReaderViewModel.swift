@@ -291,8 +291,11 @@ class ReaderViewModel {
         }
 
         // GIF 动画: 多帧必须整体解码, 缩略图接口只取第一帧
+        // 用 PlatformImage(data:) 而非 contentsOfFile: —— 与网络路径 downsampledImage 一致，
+        // 后者经实测能保留 UIImage.images 的全部帧（contentsOfFile 在合成 GIF 上会退化成静图）
         if CGImageSourceGetCount(source) > 1 {
-            return PlatformImage(contentsOfFile: fileURL.path)
+            guard let data = try? Data(contentsOf: fileURL) else { return nil }
+            return PlatformImage(data: data)
         }
 
         guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],

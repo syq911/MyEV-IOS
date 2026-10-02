@@ -276,7 +276,7 @@ struct PaginationAndSearchTests {
         return dir
     }
 
-    private static func makeCGImage(width: Int, height: Int) -> CGImage? {
+    private static func makeCGImage(width: Int, height: Int, shade: CGFloat = 0.5) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: width,
@@ -286,14 +286,17 @@ struct PaginationAndSearchTests {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+        ctx.setFillColor(CGColor(red: shade, green: 0.4, blue: 0.8, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return ctx.makeImage()
     }
 
-    /// 用 ImageIO 落一张真实图片到磁盘（frames > 1 时写 GIF 动画）
+    /// 用 ImageIO 落一张真实图片到磁盘。
+    /// frames > 1 时写 GIF 动画：每帧用不同 shade + 显式帧延时，
+    /// 避免 ImageIO 把「逐帧相同」的图合并成一帧，导致 fixture 本身就不是动图。
     private static func writeImage(
-        _ image: CGImage,
+        width: Int,
+        height: Int,
         to url: URL,
         type: CFString,
         frames: Int
@@ -301,8 +304,15 @@ struct PaginationAndSearchTests {
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, frames, nil) else {
             throw NSError(domain: "PaginationAndSearchTests", code: 1)
         }
-        for _ in 0..<frames {
-            CGImageDestinationAddImage(destination, image, nil)
+        let frameProperties: CFDictionary? = frames > 1
+            ? [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.1]] as CFDictionary
+            : nil
+        for frame in 0..<frames {
+            let shade = frames > 1 ? CGFloat(frame) / CGFloat(frames) : 0.5
+            guard let image = makeCGImage(width: width, height: height, shade: shade) else {
+                throw NSError(domain: "PaginationAndSearchTests", code: 3)
+            }
+            CGImageDestinationAddImage(destination, image, frameProperties)
         }
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "PaginationAndSearchTests", code: 2)
@@ -315,8 +325,7 @@ struct PaginationAndSearchTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("00000001.png")
-        let cgImage = try #require(Self.makeCGImage(width: 40, height: 30))
-        try Self.writeImage(cgImage, to: url, type: "public.png" as CFString, frames: 1)
+        try Self.writeImage(width: 40, height: 30, to: url, type: "public.png" as CFString, frames: 1)
 
         let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
 
@@ -339,8 +348,11 @@ struct PaginationAndSearchTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let url = dir.appendingPathComponent("00000001.gif")
-        let cgImage = try #require(Self.makeCGImage(width: 20, height: 20))
-        try Self.writeImage(cgImage, to: url, type: "com.compuserve.gif" as CFString, frames: 2)
+        try Self.writeImage(width: 20, height: 20, to: url, type: "com.compuserve.gif" as CFString, frames: 2)
+
+        // 先确认 fixture 真的是两帧动图，否则失败原因会被误读成解码丢帧
+        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+        #expect(CGImageSourceGetCount(source) == 2, "fixture 必须是两帧 GIF")
 
         let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
 
