@@ -11,6 +11,7 @@
 //
 
 import Testing
+import Foundation
 import EhModels
 import EhParser
 @testable import ehviewer_apple
