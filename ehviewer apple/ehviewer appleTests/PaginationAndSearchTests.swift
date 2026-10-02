@@ -12,6 +12,8 @@
 
 import Testing
 import Foundation
+import CoreGraphics
+import ImageIO
 import EhModels
 import EhParser
 @testable import ehviewer_apple
@@ -254,5 +256,136 @@ struct PaginationAndSearchTests {
 
         #expect(list.count == 9, "3,4,5,6,7,8 各追加一次 → 3 + 6")
         #expect(Set(list.map(\.gid)).count == list.count, "列表内不得出现重复 gid")
+    }
+
+    // MARK: - 阅读器本地加载 (1.4.1 Phase C)
+    //  已下载的漫画慢在两点: 本地文件也走 URLSession 逐字节迭代 + 预取窗口只有 6 页。
+
+    private static func makeTemporaryDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ehviewer-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func makeCGImage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()
+    }
+
+    /// 用 ImageIO 落一张真实图片到磁盘（frames > 1 时写 GIF 动画）
+    private static func writeImage(
+        _ image: CGImage,
+        to url: URL,
+        type: CFString,
+        frames: Int
+    ) throws {
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, frames, nil) else {
+            throw NSError(domain: "PaginationAndSearchTests", code: 1)
+        }
+        for _ in 0..<frames {
+            CGImageDestinationAddImage(destination, image, nil)
+        }
+        guard CGImageDestinationFinalize(destination) else {
+            throw NSError(domain: "PaginationAndSearchTests", code: 2)
+        }
+    }
+
+    /// 本地图片走 ImageIO 直接解码（不再经过 URLSession 的伪下载管线）
+    @Test func decodeLocalImageReadsFileDirectly() throws {
+        let dir = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appendingPathComponent("00000001.png")
+        let cgImage = try #require(Self.makeCGImage(width: 40, height: 30))
+        try Self.writeImage(cgImage, to: url, type: "public.png" as CFString, frames: 1)
+
+        let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
+
+        #expect(image.size.width > 0 && image.size.height > 0)
+        #expect(Int(image.size.width.rounded()) == 40, "安全尺寸内应按原尺寸解码")
+    }
+
+    /// 不存在的文件必须返回 nil 而不是崩溃
+    @Test func decodeLocalImageReturnsNilForMissingFile() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ehviewer-tests-missing-\(UUID().uuidString).png")
+
+        #expect(ReaderViewModel.decodeLocalImage(at: missing) == nil)
+    }
+
+    /// GIF 动画必须保留全部帧 —— 缩略图接口只取第一帧，会丢动画
+    #if os(iOS)
+    @Test func decodeLocalImageKeepsGIFAnimation() throws {
+        let dir = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appendingPathComponent("00000001.gif")
+        let cgImage = try #require(Self.makeCGImage(width: 20, height: 20))
+        try Self.writeImage(cgImage, to: url, type: "com.compuserve.gif" as CFString, frames: 2)
+
+        let image = try #require(ReaderViewModel.decodeLocalImage(at: url))
+
+        #expect(image.images?.count == 2, "两帧 GIF 解码后必须仍是两帧")
+    }
+    #endif
+
+    /// 目录枚举一次性建立页码映射，省掉每页 4 次 fileExists（P2-D）
+    @Test func scanLocalImageURLsMapsDownloadNaming() throws {
+        let dir = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 下载目录里混有非图片文件与 .ehviewer 记录，不能被误认成页面
+        for name in ["00000001.jpg", "00000002.png", "00000003.webp", ".ehviewer", "thumb.jpg"] {
+            FileManager.default.createFile(
+                atPath: dir.appendingPathComponent(name).path,
+                contents: Data()
+            )
+        }
+
+        let map = ReaderViewModel.scanLocalImageURLs(in: dir)
+
+        #expect(map.count == 3, "只认 8 位页码命名的图片")
+        #expect(map[0]?.lastPathComponent == "00000001.jpg")
+        #expect(map[1]?.lastPathComponent == "00000002.png")
+        #expect(map[2]?.lastPathComponent == "00000003.webp")
+    }
+
+    /// 本地画廊必须一次铺 20 页（P2-B）
+    @Test func localGalleryPreloadWindowIsTwentyPages() {
+        let window = ReaderViewModel.preloadWindow(isDownloaded: true, budget: 6, forward: true)
+
+        #expect(ReaderViewModel.localPreloadPages == 20)
+        #expect(window.ahead == 20)
+        #expect(window.behind == 3)
+    }
+
+    /// 在线画廊仍受设备预算约束，不能拿 20 个并发去锤 EH
+    @Test func onlineGalleryPreloadWindowFollowsBudget() {
+        let forward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: true)
+        #expect(forward.ahead == 6)
+        #expect(forward.behind == 1)
+
+        let backward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: false)
+        #expect(backward.ahead == 2, "逆向时前向窗口压缩到 budget/3")
+        #expect(backward.behind == 6)
+    }
+
+    /// 常驻窗口必须覆盖预取窗口，否则刚预取的页会被立刻淘汰（来回空转）
+    @Test @MainActor func localRetentionRadiusCoversPreloadWindow() {
+        let viewModel = ReaderViewModel()
+        viewModel.isDownloaded = true
+
+        #expect(viewModel.retentionRadius >= ReaderViewModel.localPreloadPages + 3)
     }
 }
