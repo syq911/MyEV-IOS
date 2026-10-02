@@ -1,7 +1,7 @@
 # EhViewer-Apple
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.1-brightgreen" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-1.4.0-brightgreen" alt="Version"/>
   <img src="https://img.shields.io/badge/platform-iOS%2026.2%2B%20%7C%20macOS%2026%2B-blue" alt="Platform"/>
   <img src="https://img.shields.io/badge/swift-6.0-orange" alt="Swift 6.0"/>
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License"/>
@@ -10,6 +10,24 @@
 用 SwiftUI 重写的 [E-Hentai](https://e-hentai.org) / [ExHentai](https://exhentai.org) 画廊客户端，支持 iPhone、iPad 和 Mac。
 
 功能与交互对齐 Android 端的 [EhViewer_CN_SXJ](https://github.com/xiaojieonly/Ehviewer_CN_SXJ)，网络层、解析器、下载引擎均为对照其实现重写，而非套壳。
+
+---
+
+## 本 fork 与上游的差异
+
+本仓库是 [felixchaos/EhViewer-Apple](https://github.com/felixchaos/EhViewer-Apple) **v1.3.1** 的定制分支（版本号 **1.4.0**）。
+**不包含上游 v1.3.2 的任何改动**——v1.3.2 引入的「首页 / 搜索触底闪退」在本分支不存在。
+
+在 v1.3.1 基础上的改动：
+
+1. **后台下载不中断** — 下载链路改走 `URLSessionConfiguration.background`，锁屏 / 切后台继续下载；
+   强杀 App 后重开自动续传（强杀本身会停传输，是系统限制）。
+2. **音量键翻页重写** — 去掉旧实现的 250ms 迟钝窗口，按键即时翻页；入口移入阅读设置且正式包可见。
+3. **进度条拖动实时翻页** — 拖动中每逢整数页变化立即跳页，不再等松手。
+4. **搜索界面重做** — 对齐安卓 FooIbar 版：分类 chips + 语言 / 评分 / 页数 chips + 搜索记录。
+5. **构建分发** — GitHub Actions 云构建产出无签名 ipa（不需要 Mac）。
+
+详细说明与已知限制见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

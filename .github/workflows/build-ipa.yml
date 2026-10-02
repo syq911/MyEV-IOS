@@ -5,6 +5,7 @@ name: Build IPA
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 # 同一分支只保留最新一次构建，避免排队堆积
@@ -129,3 +130,30 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+
+  # Phase 7：打 v* tag 时自动建 Release 并附上 ipa（用 runner 自带 gh + GITHUB_TOKEN，不需要 PAT）
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-ipa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "EhViewer-ipa-*"
+          merge-multiple: true
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          gh release create "${GITHUB_REF_NAME}" dist/EhViewer.ipa \
+            --title "EhViewer ${GITHUB_REF_NAME} (定制版)" \
+            --notes "无签名 ipa，请用 AltStore / Sideloadly 自行重签安装。详见 CHANGELOG.md。"
