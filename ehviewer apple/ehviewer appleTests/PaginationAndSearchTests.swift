@@ -13,6 +13,7 @@
 import Testing
 import EhModels
 import EhParser
+@testable import ehviewer_apple
 
 struct PaginationAndSearchTests {
 
@@ -156,5 +157,59 @@ struct PaginationAndSearchTests {
 
         #expect(url.contains("watched"))
         #expect(url.contains("f_srdd=3"))
+    }
+
+    // MARK: - 触底加载去重 (上游 issue #15 的防复发回归)
+    //  1.3.2 把 galleries 改成带 didSet 的属性并在其中回写自身，导致滚到底追加时闪退。
+    //  1.3.1 基线的去重逻辑本身是好的，这里把它抽成纯函数锁住行为，防止未来复刻出问题。
+
+    private static func gids(_ values: [Int64]) -> [GalleryInfo] {
+        values.map { GalleryInfo(gid: $0) }
+    }
+
+    /// 新一页全部是已有 gid → 判定分页回绕，返回 nil（调用方置 hasMore = false）
+    @Test func allDuplicatePageSignalsExhausted() {
+        let existing = Self.gids([1, 2, 3])
+        let incoming = Self.gids([3, 2, 1])
+
+        let result = GalleryListViewModel.freshGalleries(existing: existing, incoming: incoming)
+
+        #expect(result == nil, "全重复必须返回 nil，让列表停止加载而不是无限追加")
+    }
+
+    /// 新一页部分重复 → 只追加没见过的那几条
+    @Test func partiallyDuplicatePageAppendsOnlyFresh() {
+        let existing = Self.gids([1, 2, 3])
+        let incoming = Self.gids([3, 4, 5])
+
+        let result = GalleryListViewModel.freshGalleries(existing: existing, incoming: incoming)
+
+        #expect(result?.map(\.gid) == [4, 5])
+    }
+
+    /// 空的一页不算回绕（保持 1.3.1 原行为：继续按 pages/nextHref 判定 hasMore）
+    @Test func emptyPageIsNotExhausted() {
+        let existing = Self.gids([1, 2])
+
+        let result = GalleryListViewModel.freshGalleries(existing: existing, incoming: [])
+
+        #expect(result?.isEmpty == true, "空页返回空数组而非 nil")
+    }
+
+    /// 连续 3 次触底追加（模拟快速滚动连发）不异常、不重复、列表单调增长
+    @Test func threeConsecutiveAppendsGrowWithoutDuplicates() {
+        var list = Self.gids([1, 2, 3])
+
+        for page in 0..<3 {
+            let incoming = Self.gids([3, 4 + Int64(page) * 2, 5 + Int64(page) * 2])
+            guard let fresh = GalleryListViewModel.freshGalleries(existing: list, incoming: incoming) else {
+                Issue.record("第 \(page) 次追加不应被判定为回绕")
+                return
+            }
+            list.append(contentsOf: fresh)
+        }
+
+        #expect(list.count == 9, "3,4,5,6,7,8 各追加一次 → 3 + 6")
+        #expect(Set(list.map(\.gid)).count == list.count, "列表内不得出现重复 gid")
     }
 }

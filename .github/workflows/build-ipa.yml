@@ -78,3 +78,54 @@ jobs:
           name: EhViewer-ipa-${{ github.run_number }}
           path: build/EhViewer.ipa
           retention-days: 30
+
+  # Phase 5：回归测试 gate。与打包 job 相互独立 —— 即便测试挂了，ipa 产物照样上传，
+  # 便于「先能装、再修测试」，但 workflow 整体会标红提醒。
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          LATEST=${LATEST:-/Applications/Xcode.app}
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "ehviewer apple.xcodeproj" \
+            -scheme "ehviewer apple"
+
+      # 不写死机型：取当前镜像上最新 runtime 里可用的 iPhone 模拟器，避免机型改名 / 缺失导致误红。
+      - name: Pick an available iPhone simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available --json | python3 -c "
+          import sys, json
+          devs = json.load(sys.stdin)['devices']
+          pool = [d for rt in sorted(devs) for d in devs[rt] if 'iPhone' in d.get('name','')]
+          print(pool[-1]['udid'] if pool else '')
+          ")
+          if [ -z "$UDID" ]; then
+            echo "::error::镜像上没有可用的 iPhone 模拟器"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "挑中模拟器: $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project "ehviewer apple.xcodeproj" \
+            -scheme "ehviewer apple" \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""

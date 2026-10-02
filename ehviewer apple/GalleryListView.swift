@@ -1185,6 +1185,10 @@ struct GalleryRow: View {
 @MainActor
 @Observable
 class GalleryListViewModel {
+    /// ⚠️ 必须保持普通存储属性：禁止改成带 didSet/willSet 的观察属性，禁止在
+    /// didSet 里写回 galleries 自身，禁止用 `.onChange(of: galleries)` 反向写父视图
+    /// Binding —— 1.3.2 正是这样写导致「列表滚到底追加时闪退」(上游 issue #15)，
+    /// 1.3.1 基线没有此问题，不要移植。
     var galleries: [GalleryInfo] = []
     var isLoading = false
     var errorMessage: String?
@@ -1563,6 +1567,19 @@ class GalleryListViewModel {
         }
     }
 
+    /// 纯函数，单独抽出来是为了能被单测覆盖（loadMore 本身依赖网络，无法直接测）。
+    /// - 返回 nil：incoming 非空但全部是已有 gid → 分页回绕，调用方应停止加载更多
+    /// - 返回数组：可安全追加的新条目（incoming 为空时返回空数组，保持原行为）
+    nonisolated static func freshGalleries(
+        existing: [GalleryInfo],
+        incoming: [GalleryInfo]
+    ) -> [GalleryInfo]? {
+        guard !incoming.isEmpty else { return [] }
+        let existingGids = Set(existing.map { $0.gid })
+        let fresh = incoming.filter { !existingGids.contains($0.gid) }
+        return fresh.isEmpty ? nil : fresh
+    }
+
     func loadMore(mode: GalleryListView.ListMode) async {
         guard !isLoading, hasMore else { return }
 
@@ -1575,9 +1592,9 @@ class GalleryListViewModel {
                 let result = try await EhAPI.shared.getGalleryList(url: nextHref)
 
                 // ★ 去重保护: 如果新加载的画廊全部已在列表中，说明分页回绕了
-                let existingGids = Set(self.galleries.map { $0.gid })
-                let newGalleries = result.galleries.filter { !existingGids.contains($0.gid) }
-                if result.galleries.count > 0 && newGalleries.isEmpty {
+                guard let newGalleries = Self.freshGalleries(
+                    existing: self.galleries, incoming: result.galleries
+                ) else {
                     // 全重复 → 到达尽头，停止加载
                     self.hasMore = false
                     self.isLoading = false
