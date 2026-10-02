@@ -100,6 +100,20 @@ public final class AppSettings: @unchecked Sendable {
         set { _defaults.set(newValue, forKey: "download_origin_image") }
     }
 
+    /// 后台下载保活策略（实验性，用于对比不同后台机制的效果）：
+    /// 0 = 持续处理任务（官方 `BGContinuedProcessingTask`，默认）
+    /// 1 = 静音音频保活（`UIBackgroundModes: audio` + 播放静音，非官方做法）
+    /// 2 = 两者叠加
+    /// 3 = 都不启用（仅靠后台 URLSession + 系统唤醒）
+    @ObservationIgnored
+    public var backgroundKeepAliveStrategy: Int {
+        get {
+            let v = _defaults.object(forKey: "background_keep_alive_strategy") as? Int ?? 0
+            return (0...3).contains(v) ? v : 0
+        }
+        set { _defaults.set(max(0, min(3, newValue)), forKey: "background_keep_alive_strategy") }
+    }
+
     /// 图片分辨率 (对应 Android EhConfig.IMAGE_SIZE_*)
     /// "a" = 自动, "780", "980", "1280", "1600", "2400"
     @ObservationIgnored

@@ -727,6 +727,20 @@ struct SettingsView: View {
                 get: { AppSettings.shared.showLiveActivity },
                 set: { AppSettings.shared.showLiveActivity = $0 }
             ))
+
+            // 后台保活策略（实验）—— 用于对比不同后台下载机制的实际效果
+            Picker("后台保活策略", selection: Binding(
+                get: { AppSettings.shared.backgroundKeepAliveStrategy },
+                set: { AppSettings.shared.backgroundKeepAliveStrategy = $0 }
+            )) {
+                Text("持续处理任务（官方）").tag(0)
+                Text("静音音频保活（实验）").tag(1)
+                Text("两者叠加").tag(2)
+                Text("都不启用").tag(3)
+            }
+            Text("切换对进行中的下载即刻生效；仅用于对比后台下载效果")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             #endif
 
 
