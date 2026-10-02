@@ -89,6 +89,9 @@ final class GalleryActionService {
     /// 快速下载 (Fix A-1: 已失败/已暂停的任务允许重新启动)
     func startDownload(gallery: GalleryInfo) async {
         await DownloadManager.shared.startDownload(gallery: gallery)
+        // 有下载任务时立刻向系统登记后台处理任务：
+        // 前台提交更容易被系统接受，App 退后台后被唤醒继续推进下载的概率更高。
+        BackgroundDownloadManager.shared.scheduleBackgroundDownload()
     }
 
     /// 当前是否在计费网络上，且用户开了"移动网络下载前提醒"

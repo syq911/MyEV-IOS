@@ -52,8 +52,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
-        // 调度后台下载任务
+        // 进入后台时同时提交「下载处理」与「后台刷新」两类系统任务：
+        // 机会性调度不保证执行，但两类都登记能尽量多争取后台运行窗口。
         BackgroundDownloadManager.shared.scheduleBackgroundDownload()
+        BackgroundDownloadManager.shared.scheduleBackgroundRefresh()
+        diag("didEnterBackground: 已提交 BGProcessingTask / BGAppRefreshTask")
+    }
+
+    /// 回到前台时的兜底：若队列里有等待中的任务但当前没有活跃任务，立即重新推进。
+    /// 覆盖「App 被短暂挂起后自行恢复、未走冷启动」这条路径；
+    /// 冷启动时 resumeAllWaiting 已处理过，此处是幂等的二次保险。
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        diag("didBecomeActive: 兜底 resumeAllWaiting")
+        Task { await DownloadManager.shared.resumeAllWaiting() }
     }
 
     /// 屏幕旋转控制 (对齐 Android Settings.KEY_SCREEN_ROTATION)

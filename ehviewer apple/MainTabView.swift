@@ -6,14 +6,32 @@
 //
 
 import SwiftUI
+import Foundation
 import EhModels
 import EhSettings
 
 struct MainTabView: View {
     @Environment(AppState.self) private var appState
-    @State private var selectedTab: Tab = Tab.fromLaunchPage(AppSettings.shared.launchPage)
+    @State private var selectedTab: Tab
     /// 剪贴板打开画廊 (iOS sheet 展示)
     @State private var clipboardGallery: GalleryInfo?
+
+    /// 上次停留的标签页 —— App 进程被系统回收 / 被强杀后再打开时，用它恢复现场，
+    /// 避免用户直接回到「启动页」而丢掉退出前正在看的下载页等。
+    private static let lastSelectedTabKey = "ehviewer.last_selected_tab"
+
+    init() {
+        let fallback = Tab.fromLaunchPage(AppSettings.shared.launchPage)
+        // 仅当恢复到的标签确实存在于当前底部栏时才采用：
+        // TabView 的 selection 指向一个不存在的 tag 会导致选中态错乱。
+        if let raw = UserDefaults.standard.string(forKey: Self.lastSelectedTabKey),
+           let restored = Tab(rawValue: raw),
+           Tab.bottomTabs.contains(restored) {
+            _selectedTab = State(initialValue: restored)
+        } else {
+            _selectedTab = State(initialValue: fallback)
+        }
+    }
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -123,6 +141,7 @@ struct MainTabView: View {
             })
         }
         .onChange(of: selectedTab) { _, newTab in
+            UserDefaults.standard.set(newTab.rawValue, forKey: Self.lastSelectedTabKey)
             selectedGallery = nil
             contentPath = NavigationPath()
         }
@@ -209,6 +228,10 @@ struct MainTabView: View {
                     selectedTab = .more
                 }
             }
+        }
+        // 记住当前标签页，供下次启动恢复现场（进程被系统回收后重开不再回到启动页）
+        .onChange(of: selectedTab) { _, newTab in
+            UserDefaults.standard.set(newTab.rawValue, forKey: Self.lastSelectedTabKey)
         }
         #endif
     }
