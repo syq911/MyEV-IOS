@@ -14,6 +14,7 @@
 import Foundation
 import BackgroundTasks
 import EhDownload
+import EhModels
 #if canImport(os)
 import os
 #endif
@@ -41,6 +42,7 @@ final class BackgroundDownloadManager: NSObject, @unchecked Sendable {
         guard !isRegistered else { return }
         isRegistered = true
         #if os(iOS) && !targetEnvironment(simulator)
+        diag("BGTask: 开始注册 \(downloadTaskIdentifier) / \(refreshTaskIdentifier)")
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: downloadTaskIdentifier,
             using: nil
@@ -48,6 +50,7 @@ final class BackgroundDownloadManager: NSObject, @unchecked Sendable {
             guard let processingTask = task as? BGProcessingTask else { return }
             self?.handleBackgroundDownload(task: processingTask)
         }
+        diag("BGTask: 已注册 \(downloadTaskIdentifier)")
 
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: refreshTaskIdentifier,
@@ -56,6 +59,7 @@ final class BackgroundDownloadManager: NSObject, @unchecked Sendable {
             guard let refreshTask = task as? BGAppRefreshTask else { return }
             self?.handleBackgroundRefresh(task: refreshTask)
         }
+        diag("BGTask: 已注册 \(refreshTaskIdentifier)")
         #endif
     }
 
@@ -131,10 +135,13 @@ final class BackgroundDownloadManager: NSObject, @unchecked Sendable {
         }
 
         bgTaskLog.info("BGProcessingTask 启动，持有运行直到队列空闲")
+        diag("BGTask: handleBackgroundDownload 启动")
 
         Task {
             // 恢复下载队列中等待的任务
+            diag("BGTask: 即将 resumeAllWaiting")
             await DownloadManager.shared.resumeAllWaiting()
+            diag("BGTask: resumeAllWaiting 返回")
 
             // 持有式运行：BGProcessingTask 每次被调度有几分钟时间，
             // 以前只 sleep 2 秒就结束，等于白拿的运行时间全浪费。
@@ -148,12 +155,14 @@ final class BackgroundDownloadManager: NSObject, @unchecked Sendable {
             }
 
             bgTaskLog.info("BGProcessingTask 收尾（队列空闲或到期）")
+            diag("BGTask: handleBackgroundDownload 收尾")
             gate.finish(success: true)
         }
     }
 
     private func handleBackgroundRefresh(task: BGAppRefreshTask) {
         scheduleBackgroundRefresh() // 重新调度
+        diag("BGTask: handleBackgroundRefresh 启动")
 
         let gate = BGTaskGate(task: task)
 

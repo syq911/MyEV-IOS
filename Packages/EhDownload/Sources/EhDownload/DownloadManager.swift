@@ -36,7 +36,12 @@ public actor DownloadManager {
     ///   以前是 init 里 `Task { await loadFromDatabase() }` —— Actor 不保证 Task 之间的
     ///   执行顺序，App 启动后立刻打开已下载画廊时队列可能还是空的，
     ///   于是被判定为"未下载"、整本走网络 (issue #8 问题二)
-    private lazy var downloadQueue: [DownloadTask] = Self.tasksFromDatabase(downloadDirectory: downloadDirectory)
+    private lazy var downloadQueue: [DownloadTask] = {
+        diag("DownloadManager: 首次访问 → 同步加载下载队列(DB)")
+        let tasks = Self.tasksFromDatabase(downloadDirectory: downloadDirectory)
+        diag("DownloadManager: 下载队列加载完成 count=\(tasks.count)")
+        return tasks
+    }()
     private var activeTask: DownloadTask?
     /// 当前真正在执行的任务 gid — executeDownload 每次从 await 恢复后都要用它确认
     /// 自己是否仍然是活跃任务 (可能已被 pause/delete/pauseAll 取代)
@@ -339,8 +344,17 @@ public actor DownloadManager {
     /// 用 `activeTask == nil` 判定而不是 `isRunning`：后者在异常中断路径上可能残留 true，
     /// 会让队列永远卡死（与 resumeDownload / kickQueue 保持同一套判定）。
     public func resumeAllWaiting() {
-        guard activeTask == nil else { return }
-        guard downloadQueue.contains(where: { $0.state == Self.stateWait }) else { return }
+        diag("resumeAllWaiting: 进入")
+        guard activeTask == nil else {
+            diag("resumeAllWaiting: 已有活跃任务，忽略")
+            return
+        }
+        let waitingGids = downloadQueue.filter { $0.state == Self.stateWait }.map(\.gallery.gid)
+        guard !waitingGids.isEmpty else {
+            diag("resumeAllWaiting: 无等待任务，返回")
+            return
+        }
+        diag("resumeAllWaiting: 待恢复 gid=\(waitingGids)")
         runningGid = nil
         isRunning = false
         bgLog.info("恢复等待中的下载队列")
@@ -370,6 +384,7 @@ public actor DownloadManager {
         let gid = downloadQueue[nextIndex].gallery.gid
         runningGid = gid
 
+        diag("processQueue: 调度 gid=\(gid)")
         Task {
             await executeDownload(gid: gid)
         }
@@ -427,8 +442,10 @@ public actor DownloadManager {
     }
 
     private func executeDownload(gid: Int64) async {
+        diag("executeDownload: 进入 gid=\(gid)")
         // iOS: 申请后台执行时间, 防止进入后台后 ~30 秒被系统杀死
         let bgToken = await beginBackgroundTask()
+        diag("executeDownload: 已申请后台时间 gid=\(gid)")
 
         // ★ 每个 await 挂起点之后都必须按 gid 重新定位任务，并确认自己仍是活跃任务
         guard let index = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }),
@@ -488,7 +505,9 @@ public actor DownloadManager {
 
         // 开始下载所有页面 (startDownload() 是真正的 async，会等待全部页面完成)
         bgLog.info("管线启动 gid=\(gid) 待下载=\(gallery.pages - initialDownloaded)/\(gallery.pages) 页")
+        diag("executeDownload: 即将 spider.startDownload() gid=\(gid) 待下载=\(gallery.pages - initialDownloaded) 页")
         await spider.startDownload()
+        diag("executeDownload: spider.startDownload() 返回 gid=\(gid)")
 
         // 下载完成后更新 .ehviewer 文件
         let finalInfo = await spider.getSpiderInfo()
@@ -529,6 +548,7 @@ public actor DownloadManager {
         // iOS: 释放后台执行时间
         await endBackgroundTask(bgToken)
 
+        diag("executeDownload: 完成 gid=\(gid) finished=\(finishedCount)/\(gallery.pages)")
         finishRunning(gid: gid)
     }
 

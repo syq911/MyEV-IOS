@@ -654,6 +654,7 @@ class ReaderViewModel {
     /// 检查本地下载目录 — 替代旧的硬编码 `isDownloaded` + `gid-token` 路径
     /// 有下载记录且目录里至少有一张图就启用本地读取，缺失的页由 loadPage 逐页回退网络
     func setupLocalGallery() async {
+        diag("setupLocalGallery: 进入 gid=\(gid)")
         // ★ 不再要求"整本下载完成"才读本地 (对齐 Android SpiderDen: 逐页判断)
         //   之前只要 isGalleryFullyDownloaded 判错 (下载中断、少一页、目录存在但文件不全)，
         //   整本都会退回网络加载 —— 表现为"下载完了还是很慢 / 断网完全打不开" (issue #8 问题二)
@@ -663,6 +664,7 @@ class ReaderViewModel {
         self.isDownloaded = dir != nil
         // 目录枚举一次，建立页码 → 文件 URL 映射（1.4.1 计划 P2-D）
         self.localFileURLs = dir.map { Self.scanLocalImageURLs(in: $0) } ?? [:]
+        diag("setupLocalGallery: 完成 isDownloaded=\(isDownloaded) 本地页数=\(localFileURLs.count)")
     }
 
     func extractPTokens(from previewSet: PreviewSet) {
@@ -767,11 +769,13 @@ class ReaderViewModel {
     /// 1.4.1 计划 P2-A：本地文件没有"下载"这回事，不需要进度 UI、Referer、UA、
     /// H@H 换节点、EhAPI 回退那一整套网络管线。解码失败就报错，由用户手动重试。
     private func loadLocalImage(index: Int, fileURL: URL) async {
+        diag("loadLocalImage[\(index)]: 开始 ImageIO 解码")
         let image = await Task.detached(priority: .userInitiated) {
             Self.decodeLocalImage(at: fileURL)
         }.value
 
         guard let image else {
+            diag("loadLocalImage[\(index)]: 解码失败")
             await MainActor.run {
                 self.errorPages.insert(index)
                 self.errorMessages[index] = "本地图片读取失败"
@@ -779,6 +783,7 @@ class ReaderViewModel {
             }
             return
         }
+        diag("loadLocalImage[\(index)]: 解码完成")
 
         let cost = Self.decodedCost(of: image)
         Self.imageCache.setObject(image, forKey: self.cacheKey(for: index), cost: cost)
@@ -812,9 +817,11 @@ class ReaderViewModel {
         //   「下载图片中 xx%」的伪进度跑完才解码 —— 用户看到的就是"已下载的漫画
         //   每幅画还得先加载再显示"。这里直接走 ImageIO 映射读取 + 解码。
         if initialURL.isFileURL {
+            diag("downloadImageData[\(index)]: 本地文件快速路径")
             await loadLocalImage(index: index, fileURL: initialURL)
             return
         }
+        diag("downloadImageData[\(index)]: 网络路径")
 
         // 可变: 换 H@H 节点后 URL 会变 (对齐 Android SpiderQueen 的 nl= 重试)
         var url = initialURL
@@ -1070,6 +1077,7 @@ class ReaderViewModel {
             // 先查一次性建立的映射 (P2-D)，miss 再逐扩展名探测 —— 覆盖阅读中正好下载完成的页
             if let localURL = localFileURLs[index] ?? SpiderInfoFile.getLocalImageURL(in: dir, pageIndex: index) {
                 localFileURLs[index] = localURL
+                diag("loadPage[\(index)]: 命中本地文件")
                 await MainActor.run {
                     self.imageURLs[index] = localURL.absoluteString
                     self.errorPages.remove(index)

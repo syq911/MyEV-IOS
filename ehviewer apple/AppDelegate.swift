@@ -9,6 +9,7 @@
 import UIKit
 import EhSettings
 import EhDownload
+import EhModels
 
 class AppDelegate: NSObject, UIApplicationDelegate {
 
@@ -20,6 +21,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
+        diag("handleEventsForBackgroundURLSession: \(identifier)")
         BackgroundDownloadBridge.handleBackgroundSessionCompletion(completionHandler)
     }
 
@@ -27,17 +29,25 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        diag("didFinishLaunching: 进入")
+
         // 注册后台任务
         BackgroundDownloadManager.shared.registerBackgroundTasks()
+        diag("didFinishLaunching: registerBackgroundTasks 返回")
 
         // ★ 冷启动对账 (M3):
         //   1. 清掉上一条进程（被强杀）残留的孤儿后台任务 —— 带本传输层标记但已无等待者；
         //   2. 恢复等待队列 —— 磁盘 .ehviewer 记录会跳过已下好的页，缺哪页补哪页。
         //   系统在强杀 App 时会取消后台传输（Apple 明确行为），所以续传必须靠这一步。
         BackgroundDownloadBridge.reconcileOrphanTasks()
+        diag("didFinishLaunching: reconcileOrphanTasks 返回")
+
         Task {
+            diag("launchResume: 即将 resumeAllWaiting")
             await DownloadManager.shared.resumeAllWaiting()
+            diag("launchResume: resumeAllWaiting 返回")
         }
+        diag("didFinishLaunching: 返回 true")
         return true
     }
 

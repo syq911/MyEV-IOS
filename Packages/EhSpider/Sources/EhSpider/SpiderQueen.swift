@@ -127,6 +127,7 @@ public actor SpiderQueen {
     /// 使用 TaskGroup 实现并发控制，等待所有页面下载完成后再返回
     public func startDownload() async {
         mode = .download
+        diag("SpiderQueen.startDownload: 进入 gid=\(galleryInfo.gid) 页数=\(pageStates.count)")
 
         // 收集需要下载的页面索引
         var pagesToDownload: [Int] = []
@@ -136,7 +137,11 @@ public actor SpiderQueen {
             }
         }
 
-        guard !pagesToDownload.isEmpty else { return }
+        guard !pagesToDownload.isEmpty else {
+            diag("SpiderQueen.startDownload: 无待下载页，返回")
+            return
+        }
+        diag("SpiderQueen.startDownload: 待下载 \(pagesToDownload.count) 页")
 
         // 使用 TaskGroup 配合信号量控制并发数 (对齐 Android SpiderQueen.mWorkerPool)
         await withTaskGroup(of: Void.self) { group in
@@ -168,6 +173,7 @@ public actor SpiderQueen {
             // 等待剩余任务完成
             await group.waitForAll()
         }
+        diag("SpiderQueen.startDownload: 全部结束 gid=\(galleryInfo.gid)")
     }
 
     /// 获取页面状态
@@ -226,6 +232,7 @@ public actor SpiderQueen {
     private func loadPage(index: Int) async {
         let maxRetries = 5
         var lastError: Error?
+        diag("loadPage[\(index)]: 开始")
 
         // 已被暂停 / 删除 → 直接放弃这一页（保持 stateNone，恢复时重下）
         if isStopped {
@@ -243,6 +250,7 @@ public actor SpiderQueen {
             do {
                 // 0. 检查是否已在缓存/下载目录中 (快速路径)
                 if await spiderDen.contain(index: index) {
+                    diag("loadPage[\(index)]: 本地已有，跳过")
                     pageStates[index] = Self.stateFinish
                     if let fileUrl = await spiderDen.getImageFileURL(index: index) {
                         imageUrls[index] = fileUrl.absoluteString
@@ -298,6 +306,7 @@ public actor SpiderQueen {
                 guard !finalImageUrl.isEmpty else {
                     throw SpiderError.emptyImageUrl
                 }
+                diag("loadPage[\(index)]: 取得图片URL \(finalImageUrl.prefix(72))")
 
                 // 4. 509 检测
                 if finalImageUrl.contains("509.gif") || finalImageUrl.contains("509s.gif") {
@@ -308,7 +317,9 @@ public actor SpiderQueen {
                 }
 
                 // 5. 下载图片并存储
+                diag("loadPage[\(index)]: 开始下载图片")
                 try await downloadAndStore(imageUrl: finalImageUrl, index: index)
+                diag("loadPage[\(index)]: 图片下载完成")
 
                 // 6. 保存结果
                 imageUrls[index] = finalImageUrl
@@ -323,6 +334,7 @@ public actor SpiderQueen {
                 return
             } catch {
                 lastError = error
+                diag("loadPage[\(index)]: 第\(attempt + 1)次失败 \(error)")
                 // showKey 可能过期，清除后下次使用 HTML 方式
                 if attempt > 0 { showKey = nil }
                 // 使用用户配置的下载延迟 (downloadDelay, 毫秒) 作为基础，
@@ -336,6 +348,7 @@ public actor SpiderQueen {
         }
 
         // 所有重试失败
+        diag("loadPage[\(index)]: 重试耗尽，标记失败")
         pageStates[index] = Self.stateFailed
         await delegate?.onPageFailed(index: index, error: lastError ?? SpiderError.networkError)
         activeTasks.removeValue(forKey: index)

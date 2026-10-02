@@ -11,6 +11,7 @@ import EhDownload
 import EhSpider
 import EhSettings
 import EhDatabase
+import EhModels
 #if os(iOS)
 import UIKit
 #endif
@@ -25,6 +26,8 @@ struct EhViewerApp: App {
     #endif
 
     init() {
+        LaunchDiagnostics.shared.beginLaunch("EhViewerApp.init")
+
         // 配置全局 URLCache (对标 Android Conaco 320MB 磁盘缓存)
         // AsyncImage 和所有使用 URLSession.shared 的代码都会受益
         URLCache.shared = URLCache(
@@ -33,16 +36,21 @@ struct EhViewerApp: App {
             directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
                 .appendingPathComponent("url_cache")
         )
+        diag("init: URLCache 配置完成")
 
         // 初始化 SpiderDen 图片缓存
         SpiderDen.initialize()
+        diag("init: SpiderDen.initialize 完成")
 
         // 数据库维护: 每 7 天自动 VACUUM + WAL checkpoint (V-05 修复)
         // ⚠️ 关键修复: 延迟 10 秒再执行维护，避免 VACUUM 持有 DatabaseQueue 串行锁
         // 阻塞主线程的数据库读取 (ContinueReadingCard 等)，导致白屏 + 闪退
+        diag("init: 安排数据库维护(延迟 10s)")
         Task.detached(priority: .background) {
             try? await Task.sleep(for: .seconds(10))
+            diag("maintenance: 开始 performMaintenanceIfNeeded")
             EhDatabase.shared.performMaintenanceIfNeeded()
+            diag("maintenance: performMaintenanceIfNeeded 完成")
         }
 
         // 注意: 后台任务注册由 AppDelegate.didFinishLaunchingWithOptions 负责
@@ -50,34 +58,47 @@ struct EhViewerApp: App {
 
         // 设置通知代理
         UNUserNotificationCenter.current().delegate = DownloadNotificationService.shared
+        diag("init: 通知代理已设置")
 
         // 请求通知权限并设置下载监听器
         Task { @MainActor in
+            diag("launchTask: 开始")
             // 把本地设置同步成服务端的 uconfig Cookie
             // (图片分辨率 / 排除语言 / 排除命名空间 / 默认分类 / 预览尺寸都靠它生效)
             EhConfigSync.apply()
+            diag("launchTask: EhConfigSync.apply 完成")
 
             _ = await DownloadNotificationService.shared.requestAuthorization()
+            diag("launchTask: requestAuthorization 完成")
 
             // 注册下载通知桥接器
             await DownloadManager.shared.setListener(DownloadNotificationBridge.shared)
+            diag("launchTask: setListener 完成")
         }
-        
+
         // 标签数据库自动更新 (对齐 Android MainActivity.onCreate -> EhTagDatabase.update(this))
+        diag("init: 安排标签库更新")
         Task.detached(priority: .background) {
             do {
+                diag("tagdb: 开始 updateDatabase")
                 try await EhTagDatabase.shared.updateDatabase(forceUpdate: false)
+                diag("tagdb: updateDatabase 完成")
                 await MainActor.run { debugLog("[EhTagDatabase] Auto-update check completed") }
             } catch {
+                diag("tagdb: updateDatabase 失败: \(error)")
                 await MainActor.run { debugLog("[EhTagDatabase] Auto-update failed: \(error)") }
             }
         }
 
         // App 更新检查 (对齐 Android AppUpdater — 启动后延迟 3 秒，24 小时间隔)
+        diag("init: 安排 App 更新检查")
         Task.detached(priority: .background) {
             try? await Task.sleep(for: .seconds(3))
+            diag("update: 开始 checkOnLaunchIfNeeded")
             await AppUpdateChecker.shared.checkOnLaunchIfNeeded()
+            diag("update: checkOnLaunchIfNeeded 完成")
         }
+        diag("init: 全部启动任务已安排，init 返回")
     }
 
     var body: some Scene {

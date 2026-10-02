@@ -2,6 +2,22 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.4.2-custom] - 2026-10-02 · 诊断版
+
+> ⚠️ 这是**诊断版**，不是功能版。目的只有一个：定位 1.4.1「一打开就闪退」的根因。
+> 装回 1.4.0 可正常使用；本版用完即可被后续正式版替换。
+
+### 🔍 新增：启动断点日志 + 崩溃捕获
+
+- 新增 `LaunchDiagnostics`（`EhModels`，App 与各包共用）：把启动 / 下载 / 阅读关键步骤
+  **同步写入** `Documents/EhViewerDiagnostics.log`，每条写完立即 flush ——
+  崩溃前最后一条一定落盘，据此即可看出崩溃发生在哪一步。
+- 安装 `NSSetUncaughtExceptionHandler`（记录异常名 / 原因 / 调用栈）与常见信号处理器
+  （`SIGABRT/SIGSEGV/SIGBUS/SIGILL/SIGTRAP/SIGFPE`，记录一行标记）。
+- 日志文件通过 `UIFileSharingEnabled` 暴露：可在「文件」App → 我的 iPhone → ehviewer apple
+  直接取出，也可连电脑后用 Finder / iTunes 的「文件共享」拖出。
+- 日志超过 512KB 会在下次启动时轮转，避免无限增长。
+
 ## [1.4.1-custom] - 2026-10-02
 
 > 修两个用户实测反馈的问题：**后台下载几秒后自己停了**、**已下载的漫画每页还要转圈加载**。
