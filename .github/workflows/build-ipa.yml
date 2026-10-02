@@ -81,7 +81,11 @@ jobs:
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
           cd build
-          zip -qry EhViewer.ipa Payload
+          # 用 Apple 官方 ditto 打包（而不是 zip）：更能保留 bundle 属性，
+          # 输出结构与 Apple 自家 ipa 一致，兼容各类安装器（AltStore / Sideloadly）
+          ditto -c -k --keepParent Payload EhViewer.ipa
+          echo "=== ipa 结构自检 ==="
+          unzip -l EhViewer.ipa | tail -3
           ls -lh EhViewer.ipa
 
       - name: Upload artifact
