@@ -46,8 +46,10 @@ public actor DownloadManager {
     /// 当前真正在执行的任务 gid — executeDownload 每次从 await 恢复后都要用它确认
     /// 自己是否仍然是活跃任务 (可能已被 pause/delete/pauseAll 取代)
     private var runningGid: Int64?
-    /// 字节级传输采样 gid → (时刻, 累计字节)，用于换算实时速度
-    private var transferSample: [Int64: (at: Date, bytes: Int64)] = [:]
+    /// 每个在途页的字节采样：key = "gid:page"。
+    /// ★ 必须按页分开采样：同一 gid 下有多个并发 worker 时，各任务的
+    ///   totalBytesWritten 相互独立，混在一起做差会得到毫无意义的巨大"速度"。
+    private var transferSample: [String: (gid: Int64, at: Date, bytes: Int64, rate: Double)] = [:]
     private let maxConcurrent = 1  // 同一时间只下载一个画廊
     private var isRunning = false
 
@@ -82,7 +84,13 @@ public actor DownloadManager {
         // 传输层字节进度（已节流 500ms）→ 换算实时速度刷进下载队列，
         // 让下载列表 / 灵动岛在长页面传输期间也能持续跳动
         EhBackgroundTransport.shared.progressHandler = { context, written, _ in
-            Task { await DownloadManager.shared.applyTransferProgress(gid: context.gid, written: written) }
+            Task {
+                await DownloadManager.shared.applyTransferProgress(
+                    gid: context.gid,
+                    page: context.page,
+                    written: written
+                )
+            }
         }
     }
 
@@ -169,7 +177,7 @@ public actor DownloadManager {
             }
             // ★ 直接掐断该画廊在途的后台传输（即使 spider 引用已丢失也能停住）
             EhBackgroundTransport.shared.cancelTasks(gid: gid)
-            transferSample.removeValue(forKey: gid)
+            clearTransferSamples(gid: gid)
             // ★ 先失效 runningGid: 正在 await 中的 executeDownload 恢复后会自行退出，
             //   不会再把状态写回队列 (否则会覆盖这里设置的"已暂停")
             runningGid = nil
@@ -242,7 +250,7 @@ public actor DownloadManager {
                 Task { await spider.cancelAll() }
             }
             EhBackgroundTransport.shared.cancelTasks(gid: gid)
-            transferSample.removeValue(forKey: gid)
+            clearTransferSamples(gid: gid)
             // ★ 失效 runningGid，正在执行的 executeDownload 恢复后不会再访问已删除的任务
             runningGid = nil
             activeTask = nil
@@ -306,7 +314,9 @@ public actor DownloadManager {
     /// 更新下载进度 (由 SpiderInfoUpdater 调用，同步到队列以便 UI 读取)
     public func updateDownloadedPages(gid: Int64, count: Int) {
         if let index = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }) {
-            downloadQueue[index].downloadedPages = count
+            // 夹取到 [0, 总页数]：进度条永远不该出现超过 100% 的情况
+            let total = max(0, downloadQueue[index].gallery.pages)
+            downloadQueue[index].downloadedPages = min(max(0, count), total)
         }
     }
 
@@ -317,19 +327,47 @@ public actor DownloadManager {
         }
     }
 
-    /// 传输层字节进度（已节流 500ms）→ 换算实时速度刷进队列
-    func applyTransferProgress(gid: Int64, written: Int64) {
-        guard let index = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }) else { return }
+    /// 丢弃某个画廊的所有字节采样（暂停 / 删除时调用）
+    private func clearTransferSamples(gid: Int64) {
+        transferSample = transferSample.filter { $0.value.gid != gid }
+    }
+
+    /// 单个页任务的字节进度（传输层已按 500ms 节流）→ 换算实时速度刷进队列。
+    ///
+    /// ★ 按 (gid, page) 分开采样：同一下载里多个 worker 并发取不同页，各自的
+    ///   totalBytesWritten 是**独立**计数器。以前只按 gid 存一个采样点，等于拿
+    ///   不同任务的计数器交替做差 —— 差值毫无意义，长页 + 短页混在一起时能算出
+    ///   上百 MB/s 的假速度。现在按页算速率，再按 gid 求和得到真实总速度。
+    func applyTransferProgress(gid: Int64, page: Int?, written: Int64) {
         let now = Date()
-        guard let sample = transferSample[gid] else {
-            transferSample[gid] = (now, written)
-            return
+        let key = "\(gid):\(page ?? -1)"
+
+        if let sample = transferSample[key] {
+            let elapsed = now.timeIntervalSince(sample.at)
+            if elapsed >= 0.4 {
+                let delta = written - sample.bytes
+                // delta < 0 说明底层任务被重建（换 H@H 节点等），旧速率作废重新采样
+                let rate = delta >= 0 ? Double(delta) / elapsed : 0
+                transferSample[key] = (gid, now, written, rate)
+            }
+        } else {
+            transferSample[key] = (gid, now, written, 0)
         }
-        let elapsed = now.timeIntervalSince(sample.at)
-        guard elapsed >= 0.4 else { return }
-        let delta = written - sample.bytes
-        if delta >= 0 { downloadQueue[index].speed = Int64(Double(delta) / elapsed) }
-        transferSample[gid] = (now, written)
+
+        // 清掉 5 秒内没有更新的采样（任务已结束 / 卡住），避免旧速率被一直累加
+        let cutoff = now.addingTimeInterval(-5)
+        if transferSample.contains(where: { $0.value.at < cutoff }) {
+            transferSample = transferSample.filter { $0.value.at >= cutoff }
+        }
+
+        // 该画廊所有在途页的速率之和 = 实时速度
+        let totalRate = transferSample.values
+            .filter { $0.gid == gid }
+            .reduce(0.0) { $0 + $1.rate }
+
+        if let index = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }) {
+            downloadQueue[index].speed = Int64(totalRate)
+        }
     }
 
     /// 设置下载监听器
@@ -479,8 +517,8 @@ public actor DownloadManager {
         // 创建 SpiderQueen
         let spider = SpiderQueen(galleryInfo: gallery, spiderInfo: spiderInfo, mode: .download)
 
-        // 统计已有的下载页数作为初始值
-        let initialDownloaded = SpiderInfoFile.getDownloadedPages(in: dir, totalPages: gallery.pages).count
+        // 统计磁盘上已有的页（返回页索引集合，用于对进度判重）
+        let alreadyOnDisk = SpiderInfoFile.getDownloadedPages(in: dir, totalPages: gallery.pages)
 
         // onDownloadStart 是 await — 队列可能已在此期间变化，重新定位
         guard let setupIndex = downloadQueue.firstIndex(where: { $0.gallery.gid == gid }),
@@ -490,7 +528,8 @@ public actor DownloadManager {
             return
         }
         downloadQueue[setupIndex].spider = spider
-        downloadQueue[setupIndex].downloadedPages = initialDownloaded
+        downloadQueue[setupIndex].downloadedPages = alreadyOnDisk.count
+        downloadQueue[setupIndex].speed = 0   // 续传前清掉上一轮残留的速度，避免展示旧值
 
         // 设置代理以便更新 .ehviewer 文件和进度通知
         let updater = SpiderInfoUpdater(
@@ -499,13 +538,13 @@ public actor DownloadManager {
             title: gallery.bestTitle,
             total: gallery.pages,
             listener: listener,
-            initialDownloaded: initialDownloaded
+            alreadyOnDisk: alreadyOnDisk
         )
         await spider.setDelegate(updater)
 
         // 开始下载所有页面 (startDownload() 是真正的 async，会等待全部页面完成)
-        bgLog.info("管线启动 gid=\(gid) 待下载=\(gallery.pages - initialDownloaded)/\(gallery.pages) 页")
-        diag("executeDownload: 即将 spider.startDownload() gid=\(gid) 待下载=\(gallery.pages - initialDownloaded) 页")
+        bgLog.info("管线启动 gid=\(gid) 待下载=\(gallery.pages - alreadyOnDisk.count)/\(gallery.pages) 页")
+        diag("executeDownload: 即将 spider.startDownload() gid=\(gid) 待下载=\(gallery.pages - alreadyOnDisk.count) 页")
         await spider.startDownload()
         diag("executeDownload: spider.startDownload() 返回 gid=\(gid)")
 
@@ -534,6 +573,7 @@ public actor DownloadManager {
         let success = finishedCount == gallery.pages
         downloadQueue[finalIndex].state = success ? Self.stateFinish : Self.stateFailed
         downloadQueue[finalIndex].downloadedPages = finishedCount
+        downloadQueue[finalIndex].speed = 0     // 收尾清速度，否则 UI 会一直停在上一次的非零值
         downloadQueue[finalIndex].spider = nil  // 释放 spider 引用
         try? EhDatabase.shared.updateDownloadState(gid: gallery.gid, state: downloadQueue[finalIndex].state)
         if success {
@@ -747,20 +787,45 @@ actor SpiderInfoUpdater: SpiderDelegate {
     private let totalPages: Int
     private weak var listener: DownloadListener?
 
+    /// 已计入进度的页索引。
+    ///
+    /// 以「本次运行开始前磁盘上已有的页」为种子，之后只有**真正新下载**的页才计入。
+    /// 否则续传时必现两个 bug（1.4.2 日志已证实）：
+    ///   1. 已存在的页在 SpiderQueen 里走「本地已有」快速路径时同样会回调 onPageLoaded，
+    ///      于是被重复计数 → 进度假前进一大截，甚至超过 100%；
+    ///   2. 这些页的字节也被累加进"已下载字节"，再除以「运行开始后极短的耗时」，
+    ///      得到几百 MB/s 的荒谬速度。
+    private var countedIndices: Set<Int>
+    /// 进度（= 已计入的页数，恒 ≤ totalPages）
     private var downloadedCount: Int
-    private var totalBytesDownloaded: Int64 = 0
-    private var startTime: Date = Date()
+    /// 本次运行真正新下载的字节数（不含磁盘上已有的页，也不含任何本地读取）
+    private var networkBytes: Int64 = 0
+
     private var lastNotifyTime: Date = .distantPast
     private let notifyInterval: TimeInterval = 1.0 // 每秒最多通知一次
+    /// 速度滑动窗口：两次采样至少间隔这么久，避免把抖动放大成天文数字
+    private var speedSampleAt: Date = Date()
+    private var speedSampleBytes: Int64 = 0
+    private var currentSpeed: Int64 = 0
+    private let speedSampleInterval: TimeInterval = 0.5
 
-    init(directory: URL, gid: Int64, title: String, total: Int, listener: DownloadListener?, initialDownloaded: Int = 0) {
+    init(
+        directory: URL,
+        gid: Int64,
+        title: String,
+        total: Int,
+        listener: DownloadListener?,
+        alreadyOnDisk: Set<Int> = []
+    ) {
         self.directory = directory
         self.gid = gid
         self.title = title
         self.totalPages = total
         self.listener = listener
-        self.downloadedCount = initialDownloaded
-        self.startTime = Date()
+        self.countedIndices = alreadyOnDisk
+        self.downloadedCount = alreadyOnDisk.count
+        self.speedSampleAt = Date()
+        diag("updater: 初始化 gid=\(gid) 已在磁盘=\(alreadyOnDisk.count)/\(total) 页(这些不再重复计数)")
     }
 
     /// 获取指定页面的实际文件大小
@@ -777,24 +842,33 @@ actor SpiderInfoUpdater: SpiderDelegate {
     }
 
     func onPageLoaded(index: Int, imageUrl: String) async {
-        downloadedCount += 1
+        // ★ 本次运行开始前就已在磁盘上的页（SpiderQueen 走「本地已有」快速路径）：
+        //   不重复计进度、不计字节 —— 它们既不是这次下载的成果，也没有产生任何网络流量。
+        guard !countedIndices.contains(index) else { return }
+        countedIndices.insert(index)
+        downloadedCount = min(countedIndices.count, totalPages)
 
-        // 累计实际下载字节数
-        let pageSize = getPageFileSize(index: index)
-        totalBytesDownloaded += pageSize
+        // 只累计本次真正新下载的字节
+        networkBytes += getPageFileSize(index: index)
 
         // 同步更新 DownloadManager 队列中的进度 (便于 UI 读取)
         await DownloadManager.shared.updateDownloadedPages(gid: gid, count: downloadedCount)
 
-        // 计算真实下载速度 (字节/秒)
-        let elapsed = Date().timeIntervalSince(startTime)
-        let speed = elapsed > 0 ? Int64(Double(totalBytesDownloaded) / elapsed) : 0
+        // 速度 = 滑动窗口内的 Δ字节 / Δ时间。
+        // 不用「累计字节 / 自运行开始的耗时」—— 后者是平均速度且会被磁盘已有页污染，
+        // 续传时首屏就能爆出几百 MB/s。
+        let now = Date()
+        let dt = now.timeIntervalSince(speedSampleAt)
+        if dt >= speedSampleInterval {
+            currentSpeed = Int64(Double(networkBytes - speedSampleBytes) / dt)
+            speedSampleAt = now
+            speedSampleBytes = networkBytes
+        }
 
         // 同步速度到 DownloadManager 队列 (便于 UI 读取)
-        await DownloadManager.shared.updateDownloadSpeed(gid: gid, speed: speed)
+        await DownloadManager.shared.updateDownloadSpeed(gid: gid, speed: currentSpeed)
 
         // 节流通知
-        let now = Date()
         if now.timeIntervalSince(lastNotifyTime) >= notifyInterval {
             lastNotifyTime = now
             await listener?.onDownloadProgress(
@@ -802,7 +876,7 @@ actor SpiderInfoUpdater: SpiderDelegate {
                 title: title,
                 downloaded: downloadedCount,
                 total: totalPages,
-                speed: speed
+                speed: currentSpeed
             )
         }
     }
@@ -823,7 +897,8 @@ actor SpiderInfoUpdater: SpiderDelegate {
     }
 
     func onDownloadProgress(downloaded: Int, total: Int) async {
-        downloadedCount = downloaded
+        // SpiderQueen 目前不会调用它；保留协议实现，并按总量夹取，避免进度越界
+        downloadedCount = min(max(0, downloaded), totalPages)
     }
 }
 
