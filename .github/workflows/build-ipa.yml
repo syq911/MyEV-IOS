@@ -1,0 +1,80 @@
+name: Build IPA
+
+# 定制版打包流水线：产出「无签名 ipa」，供用户用 AltStore / Sideloadly 自行重签安装。
+# 与 build.yml 的分工：build.yml 只做编译校验（不含打包），本文件负责产出可分发的产物。
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+# 同一分支只保留最新一次构建，避免排队堆积
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 镜像上可能有多个 Xcode，取最新的一个
+      - name: Select newest Xcode
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          LATEST=${LATEST:-/Applications/Xcode.app}
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i ios || true
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "ehviewer apple.xcodeproj" \
+            -scheme "ehviewer apple"
+
+      # 不做签名：ipa 的可安装性由安装时用用户自己的 Apple ID 重签来保证。
+      # 注意命令行覆盖版本号，工程文件里的 MARKETING_VERSION 不动。
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project "ehviewer apple.xcodeproj" \
+            -scheme "ehviewer apple" \
+            -destination "generic/platform=iOS" \
+            -archivePath build/EhViewer.xcarchive \
+            MARKETING_VERSION=1.4.0 \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/EhViewer.xcarchive/Products/Applications/ehviewer apple.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::未找到 .app 产物，打印 archive 内容以便排查"
+            find build/EhViewer.xcarchive -maxdepth 4 -name "*.app" -print
+            exit 1
+          fi
+          echo "=== 产物信息 ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" || true
+          echo "=== 内嵌扩展 ==="
+          ls "$APP/PlugIns" 2>/dev/null || echo "(无 PlugIns)"
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build
+          zip -qry EhViewer.ipa Payload
+          ls -lh EhViewer.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EhViewer-ipa-${{ github.run_number }}
+          path: build/EhViewer.ipa
+          retention-days: 30
