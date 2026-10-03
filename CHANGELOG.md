@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [1.4.9-custom] - 2026-10-03
+
+> 纯**分发/打包**改动，不含功能变更：发布产物从「无签名 ipa」改为
+> **ad-hoc 签名 ipa**（`codesign --sign -`），修 iOS 27 上侧载后「一打开就闪退、且无日志」的问题。
+
+### 🐞 根因（有崩溃报告实锤）
+
+用户反馈全新安装后一启动就闪退、且诊断日志里连一行都没有。取到的 iOS 崩溃报告显示：
+
+```
+signal: SIGKILL - CODESIGNING
+termination: namespace=CODESIGNING, indicator="Invalid Page"
+栈顶: dyld4::prepare → PrebuiltObjC::make（还在读 App 自己的 __TEXT 页）
+```
+
+即系统在**启动阶段**按页校验二进制的代码签名，发现某页哈希与签名不符，直接在 `main` 之前杀掉进程 ——
+所以 App 代码一行都没跑，自然没有任何日志。
+
+对比 1.4.5 / 1.4.8 产物：两者二进制**均无 `LC_CODE_SIGNATURE`**（完全没有签名），
+签名全靠安装时的侧载工具现场生成；而设备已是 **iOS 27.0**，对代码签名校验更严格，
+旧的「从零给无签名二进制补签名」路径在 iOS 27 上会产出不被接受的签名。
+
+### 🔧 改动
+
+- `.github/workflows/build-ipa.yml` 打包步骤新增 **ad-hoc 签名**：先内嵌扩展
+  （`PlugIns/*.appex`）、再主 App，用 Apple 官方 `codesign --force --sign - --timestamp=none`，
+  随后 `codesign -dv/--verify` 打印校验信息；最后再用 `ditto` 打成 ipa。
+- 目的：给安装时的重签工具一个**已带合法代码签名**的基线，避开上述「从零补签名」路径。
+- 仓库文案同步：「无签名 ipa」→「ad-hoc 签名 ipa」。
+
+### ⚠️ 说明
+
+- 本版**没有改任何功能代码**；e-hentai 内容与业务行为与 1.4.8 完全一致。
+- 首选修法仍是**把侧载工具（AltStore / SideStore / Sideloadly）升级到支持 iOS 27 的最新版**，
+  或用 Xcode 直接安装；本改动是同时生效的兜底。
+
 ## [1.4.8-custom] - 2026-10-02
 
 > 三个体验改进：**下载列表点击分区**、**排行榜修复**、**搜索选项记忆**。

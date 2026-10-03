@@ -28,7 +28,7 @@
 3. **音量键翻页重写** — 去掉旧实现的 250ms 迟钝窗口，按键即时翻页；入口移入阅读设置且正式包可见。
 4. **进度条拖动实时翻页** — 拖动中每逢整数页变化立即跳页，不再等松手。
 5. **搜索界面重做** — 对齐安卓 FooIbar 版：分类 chips + 语言 / 评分 / 页数 chips + 搜索记录。
-6. **构建分发** — GitHub Actions 云构建产出无签名 ipa（不需要 Mac）。
+6. **构建分发** — GitHub Actions 云构建产出 ad-hoc 签名 ipa（不需要 Mac）。
 
 详细说明与已知限制见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -88,6 +88,7 @@ https://github.com/syq911/MyEV-IOS/releases/latest/download/source.json
 
 - 在 AltStore / SideStore 的 **Sources → 添加源** 里粘贴上面的地址即可。
 - 该源清单随每次发布自动更新，并列出全部历史版本。
+- 发布的 ipa 已做 **ad-hoc 签名**（`codesign --sign -`，仅作重签基线）；安装时仍会用你自己的证书重签。
 - 当前构建最低系统版本为 **iOS 26.2**（每个版本的实际要求以源清单中标注为准）。
 
 ---

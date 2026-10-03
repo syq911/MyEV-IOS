@@ -1,6 +1,6 @@
 name: Build IPA
 
-# 定制版打包流水线：产出「无签名 ipa」，供用户用 AltStore / Sideloadly 自行重签安装。
+# 定制版打包流水线：产出「ad-hoc 签名 ipa」，供用户用 AltStore / Sideloadly 自行重签安装。
 # 与 build.yml 的分工：build.yml 只做编译校验（不含打包），本文件负责产出可分发的产物。
 on:
   push:
@@ -36,7 +36,7 @@ jobs:
             -project "ehviewer apple.xcodeproj" \
             -scheme "ehviewer apple"
 
-      # 不做签名：ipa 的可安装性由安装时用用户自己的 Apple ID 重签来保证。
+      # 归档阶段不签名（CODE_SIGNING_ALLOWED=NO）；ad-hoc 签名在打包步骤里用 codesign 完成。
       # 版本号优先取 tag（v1.4.1 → 1.4.1），分支构建用默认值；这样 tag 与 ipa 内版本永不漂移。
       - name: Resolve marketing version
         id: ver
@@ -63,7 +63,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Package unsigned IPA
+      - name: Ad-hoc sign & package IPA
         run: |
           set -euo pipefail
           APP="build/EhViewer.xcarchive/Products/Applications/ehviewer apple.app"
@@ -78,8 +78,33 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" || true
           echo "=== 内嵌扩展 ==="
           ls "$APP/PlugIns" 2>/dev/null || echo "(无 PlugIns)"
+
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
+          TARGET="build/Payload/ehviewer apple.app"
+
+          # 清掉扩展属性 / 资源分叉，避免 codesign 报 detritus
+          xattr -cr "$TARGET" || true
+
+          # 用 Apple 官方 codesign 做 ad-hoc 签名（--sign -）。
+          # 目的：给安装时的重签工具一个「已带代码签名」的基线 —— 部分工具在
+          # 「从零给完全无签名的二进制补签名」这条路径上于 iOS 27 会产出
+          # SIGKILL - CODESIGNING / Invalid Page，导致启动即闪退。
+          # 顺序必须由内到外：先内嵌扩展，再主 App。
+          if [ -d "$TARGET/PlugIns" ]; then
+            for appex in "$TARGET/PlugIns"/*.appex; do
+              [ -d "$appex" ] || continue
+              echo "ad-hoc 签名扩展: $appex"
+              codesign --force --sign - --timestamp=none "$appex"
+            done
+          fi
+          echo "ad-hoc 签名主 App"
+          codesign --force --sign - --timestamp=none "$TARGET"
+
+          echo "=== 签名校验 ==="
+          codesign -dv --verbose=4 "$TARGET" 2>&1 | sed -n '1,12p' || true
+          codesign --verify --verbose=2 "$TARGET" || true
+
           cd build
           # 用 Apple 官方 ditto 打包（而不是 zip）：更能保留 bundle 属性，
           # 输出结构与 Apple 自家 ipa 一致，兼容各类安装器（AltStore / Sideloadly）
@@ -171,7 +196,7 @@ jobs:
           ls -lh dist
           gh release create "${GITHUB_REF_NAME}" dist/EhViewer.ipa \
             --title "EhViewer ${GITHUB_REF_NAME} (定制版)" \
-            --notes "无签名 ipa，请用 AltStore / Sideloadly 自行重签安装。详见 CHANGELOG.md。"
+            --notes "ad-hoc 签名 ipa（仅作重签基线），请用 AltStore / Sideloadly 自行重签安装。详见 CHANGELOG.md。"
 
       # 生成 AltStore / SideStore 源清单，作为本次 Release 的附件上传。
       # 对外统一地址（加进 AltStore 后即可自动检查更新）：
