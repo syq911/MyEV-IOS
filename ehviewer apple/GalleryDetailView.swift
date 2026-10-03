@@ -229,9 +229,32 @@ struct GalleryDetailView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 // 根据设置显示日文/中文或英文标题 (对齐 Android EhUtils.getSuitableTitle)
+                // 标题可复制：长按走系统文本选择，或长按选「复制标题」一键复制整条标题
                 Text(gallery.suitableTitle(preferJpn: AppSettings.shared.showJpnTitle))
                     .font(.headline)
                     .lineLimit(4)
+                    .textSelection(.enabled)
+                    .contextMenu {
+                        Button {
+                            copyToPasteboard(gallery.suitableTitle(preferJpn: AppSettings.shared.showJpnTitle))
+                        } label: {
+                            Label("复制标题", systemImage: "doc.on.doc")
+                        }
+                        if let jpn = gallery.titleJpn, !jpn.isEmpty {
+                            Button {
+                                copyToPasteboard(jpn)
+                            } label: {
+                                Label("复制日文标题", systemImage: "doc.on.doc")
+                            }
+                        }
+                        if let eng = gallery.title, !eng.isEmpty {
+                            Button {
+                                copyToPasteboard(eng)
+                            } label: {
+                                Label("复制英文标题", systemImage: "doc.on.doc")
+                            }
+                        }
+                    }
 
                 if let uploader = gallery.uploader {
                     uploaderButton(uploader)
@@ -282,6 +305,18 @@ struct GalleryDetailView: View {
             }
         }
         .padding()
+    }
+
+    /// 复制文本到剪贴板（跨平台）
+    private func copyToPasteboard(_ text: String) {
+        guard !text.isEmpty else { return }
+        Haptics.tap()
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
+        #endif
     }
 
     /// 详情页封面尺寸 (对齐 Android Settings.KEY_DETAIL_SIZE)

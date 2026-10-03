@@ -20,31 +20,33 @@ struct TopListView: View {
 
     private let periods = ["全部时间", "过去一年", "过去一个月", "昨天"]
 
+    /// 时间维度 → toplist.php 的 tl 参数
+    /// 对齐 e-hentai 真实页面: 11 全部时间 / 12 过去一年 / 13 过去一个月 / 15 昨天
+    private static let periodTL = [11, 12, 13, 15]
+
     init(isPushed: Bool = false) {
         self.isPushed = isPushed
     }
 
-    /// 从排行榜链接中解析画廊 gid 和 token
-    /// href 格式: https://e-hentai.org/g/12345/abcdef1234/ 或 /g/12345/abcdef1234/
-    private static func parseGalleryHref(_ href: String?) -> (gid: Int64, token: String)? {
-        guard let href else { return nil }
-        // 匹配 /g/{gid}/{token}/ 模式
-        let pattern = #"/g/(\d+)/([0-9a-f]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: href, range: NSRange(href.startIndex..., in: href)),
-              match.numberOfRanges >= 3 else { return nil }
-        guard let gidRange = Range(match.range(at: 1), in: href),
-              let tokenRange = Range(match.range(at: 2), in: href),
-              let gid = Int64(href[gidRange]) else { return nil }
-        return (gid, String(href[tokenRange]))
-    }
-
     var body: some View {
         if isPushed {
+            // 父 NavigationStack (MoreTabView / MainTabView) 已注册所需 destination
             topListContent
         } else {
             NavigationStack {
                 topListContent
+                    // 与全 App 保持一致：全部走 value-based 导航，避免与顶层
+                    // NavigationStack 里的 destination-based 链接混用导致路径错乱
+                    .navigationDestination(for: GalleryInfo.self) { gallery in
+                        GalleryDetailView(gallery: gallery)
+                            .id(gallery.gid)
+                    }
+                    .navigationDestination(for: UploaderSearchDestination.self) { dest in
+                        GalleryListView(mode: .uploader(keyword: dest.uploader), isPushed: true)
+                    }
+                    .navigationDestination(for: TagSearchDestination.self) { dest in
+                        GalleryListView(mode: .tag(keyword: dest.tag), isPushed: true)
+                    }
             }
         }
     }
@@ -102,7 +104,16 @@ struct TopListView: View {
                 selectedCategory = 0
             }
         }
-        .task { await vm.load() }
+        .onChange(of: selectedCategory) { _, _ in
+            Task { await loadGalleryIfNeeded() }
+        }
+        .onChange(of: selectedPeriod) { _, _ in
+            Task { await loadGalleryIfNeeded() }
+        }
+        .task {
+            await vm.load()
+            await loadGalleryIfNeeded()
+        }
     }
 
     /// 当前选中的分类名
@@ -113,6 +124,13 @@ struct TopListView: View {
 
     /// 是否 Gallery 分类 —— 只有它用画廊行样式展示（左封面 + 右文字信息）
     private var isGalleryCategory: Bool { currentCategoryName == "Gallery" }
+
+    /// Gallery 分类的数据来自 toplist.php?tl= 标准画廊列表（带封面），按需加载
+    private func loadGalleryIfNeeded(force: Bool = false) async {
+        guard isGalleryCategory else { return }
+        let index = min(max(selectedPeriod, 0), Self.periodTL.count - 1)
+        await vm.loadGalleryTopList(tl: Self.periodTL[index], force: force)
+    }
 
     /// 分类选择胶囊（横向滚动，放得下全部分类）
     private func categoryChip(index: Int, name: String) -> some View {
@@ -134,29 +152,58 @@ struct TopListView: View {
 
     @ViewBuilder
     private var topListBody: some View {
-        let items = vm.items(for: selectedCategory, period: selectedPeriod)
-        List(items.indices, id: \.self) { idx in
-            let item = items[idx]
-            if isGalleryCategory, let parsed = Self.parseGalleryHref(item.href) {
-                // Gallery 分类：复用「热门」的画廊行 (左封面 + 右文字信息)
-                NavigationLink {
-                    GalleryDetailView(gallery: galleryInfo(item, parsed: parsed))
-                        .id(parsed.gid)
-                } label: {
+        if isGalleryCategory {
+            galleryListBody
+        } else {
+            textListBody
+        }
+    }
+
+    /// Gallery 分类：标准画廊列表（左封面 + 右文字信息，对齐首页卡片）
+    @ViewBuilder
+    private var galleryListBody: some View {
+        if vm.isLoadingGallery && vm.galleryItems.isEmpty {
+            ProgressView("加载排行榜...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let error = vm.galleryErrorMessage, vm.galleryItems.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text(error)
+                    .foregroundStyle(.secondary)
+                Button("重试") {
+                    Task { await loadGalleryIfNeeded(force: true) }
+                }
+                .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(vm.galleryItems, id: \.gid) { gallery in
+                NavigationLink(value: gallery) {
                     GalleryRow(
-                        gallery: galleryInfo(item, parsed: parsed),
+                        gallery: gallery,
                         showJpnTitle: AppSettings.shared.showJpnTitle,
                         fixThumbUrl: AppSettings.shared.fixThumbUrl
                     )
                 }
-            } else if isGalleryCategory {
-                // Gallery 分类但链接解析失败 —— 退化为纯文本行
-                TopListRow(rank: idx + 1, item: item)
+                .listRowInsets(EdgeInsets())
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    /// 其它分类 (Uploader / Tagging / ...)：文字列表，点击进入上传者/标签画廊列表
+    private var textListBody: some View {
+        let items = vm.items(for: selectedCategory, period: selectedPeriod)
+        return List(items.indices, id: \.self) { idx in
+            let item = items[idx]
+            if let uploader = Self.uploaderName(from: item.href) {
+                NavigationLink(value: UploaderSearchDestination(uploader: uploader)) {
+                    TopListRow(rank: idx + 1, item: item)
+                }
             } else {
-                // 其它分类 (Uploader / Tagging / ...)：点击用搜索逻辑打开对应内容
-                NavigationLink {
-                    searchDestination(for: item)
-                } label: {
+                NavigationLink(value: TagSearchDestination(tag: Self.tagName(from: item.href) ?? item.text)) {
                     TopListRow(rank: idx + 1, item: item)
                 }
             }
@@ -164,23 +211,18 @@ struct TopListView: View {
         .listStyle(.plain)
     }
 
-    private func galleryInfo(_ item: TopListItem, parsed: (gid: Int64, token: String)) -> GalleryInfo {
-        GalleryInfo(gid: parsed.gid, token: parsed.token, title: item.text, thumb: item.thumb)
-    }
-
-    /// 非 Gallery 分类点击后的跳转目标：上传者走上传者搜索，其余走关键词搜索
-    @ViewBuilder
-    private func searchDestination(for item: TopListItem) -> some View {
-        if let uploader = Self.uploaderName(from: item.href) {
-            GalleryListView(mode: .uploader(keyword: uploader), isPushed: true)
-        } else {
-            GalleryListView(mode: .search(keyword: item.text), isPushed: true)
-        }
-    }
-
     /// 从 /uploader/<name> 形式的 href 里取出上传者名
     private static func uploaderName(from href: String?) -> String? {
         guard let href, let r = href.range(of: "/uploader/") else { return nil }
+        let rest = href[r.upperBound...]
+        let name = rest.split(separator: "/").first.map(String.init) ?? ""
+        let decoded = name.removingPercentEncoding ?? name
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    /// 从 /tag/<name> 形式的 href 里取出标签名
+    private static func tagName(from href: String?) -> String? {
+        guard let href, let r = href.range(of: "/tag/") else { return nil }
         let rest = href[r.upperBound...]
         let name = rest.split(separator: "/").first.map(String.init) ?? ""
         let decoded = name.removingPercentEncoding ?? name
@@ -231,6 +273,12 @@ class TopListViewModel {
     var errorMessage: String?
     var detail: TopListDetail?
 
+    /// Gallery 分类：来自 toplist.php?tl= 的标准画廊列表（含封面/标签/评分）
+    var galleryItems: [GalleryInfo] = []
+    var isLoadingGallery = false
+    var galleryErrorMessage: String?
+    private var loadedGalleryTL: Int?
+
     var categoryNames: [String] {
         detail?.lists.map { $0.name } ?? []
     }
@@ -253,6 +301,34 @@ class TopListViewModel {
             await MainActor.run {
                 self.errorMessage = EhError.localizedMessage(for: error)
                 self.isLoading = false
+            }
+        }
+    }
+
+    /// 加载 Gallery 分类的标准排行榜（带封面）。
+    ///
+    /// 总览页 (toplist.php 不带 tl) 里的每一项只有一行文字链接、**不含封面图**，
+    /// 所以 Gallery 分类改用带 tl 参数的标准紧凑画廊列表页 (itg gltc)，
+    /// 结构与首页完全一致，通用解析器可直接吃下（对应 Android ListUrlBuilder.MODE_TOPLIST）。
+    func loadGalleryTopList(tl: Int, force: Bool = false) async {
+        if !force, loadedGalleryTL == tl, !galleryItems.isEmpty { return }
+        await MainActor.run {
+            isLoadingGallery = true
+            galleryErrorMessage = nil
+        }
+
+        do {
+            let url = "\(EhURL.topListUrl())?tl=\(tl)"
+            let parsed = try await EhAPI.shared.getGalleryList(url: url)
+            await MainActor.run {
+                self.galleryItems = parsed.galleries
+                self.loadedGalleryTL = tl
+                self.isLoadingGallery = false
+            }
+        } catch {
+            await MainActor.run {
+                self.galleryErrorMessage = EhError.localizedMessage(for: error)
+                self.isLoadingGallery = false
             }
         }
     }
