@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Foundation
 import EhModels
 import EhSettings
 
@@ -146,6 +147,53 @@ class AdvancedSearchState {
         disableLanguageFilter = false
         disableUploaderFilter = false
         disableTagFilter = false
+    }
+
+    // MARK: - 持久化（记住上次的搜索选项，避免每次点开搜索都被重置）
+
+    private static let persistKey = "ehviewer.advanced_search_state"
+
+    /// 从 UserDefaults 恢复上次的搜索选项；没有记录时返回默认状态
+    static func load() -> AdvancedSearchState {
+        let state = AdvancedSearchState()
+        guard let dict = UserDefaults.standard.dictionary(forKey: persistKey) else { return state }
+        state.searchMode = SearchMode(rawValue: dict["searchMode"] as? Int ?? 0) ?? .normal
+        state.selectedCategories = dict["selectedCategories"] as? Int ?? EhCategory.all.rawValue
+        state.language = dict["language"] as? Int ?? -1
+        state.minRating = dict["minRating"] as? Int ?? -1
+        state.pageFrom = dict["pageFrom"] as? String ?? ""
+        state.pageTo = dict["pageTo"] as? String ?? ""
+        state.onlyShowWithTorrents = dict["onlyShowWithTorrents"] as? Bool ?? false
+        state.searchExpungedGalleries = dict["searchExpungedGalleries"] as? Bool ?? false
+        state.disableLanguageFilter = dict["disableLanguageFilter"] as? Bool ?? false
+        state.disableUploaderFilter = dict["disableUploaderFilter"] as? Bool ?? false
+        state.disableTagFilter = dict["disableTagFilter"] as? Bool ?? false
+        return state
+    }
+
+    /// 把当前搜索选项写入 UserDefaults
+    func save() {
+        let dict: [String: Any] = [
+            "searchMode": searchMode.rawValue,
+            "selectedCategories": selectedCategories,
+            "language": language,
+            "minRating": minRating,
+            "pageFrom": pageFrom,
+            "pageTo": pageTo,
+            "onlyShowWithTorrents": onlyShowWithTorrents,
+            "searchExpungedGalleries": searchExpungedGalleries,
+            "disableLanguageFilter": disableLanguageFilter,
+            "disableUploaderFilter": disableUploaderFilter,
+            "disableTagFilter": disableTagFilter,
+        ]
+        UserDefaults.standard.set(dict, forKey: Self.persistKey)
+    }
+
+    /// 组合签名 —— 任一选项变化都会改变它，供 onChange 触发保存
+    var persistSignature: String {
+        "\(searchMode.rawValue)|\(selectedCategories)|\(language)|\(minRating)|\(pageFrom)|\(pageTo)"
+            + "|\(onlyShowWithTorrents)|\(searchExpungedGalleries)|\(disableLanguageFilter)"
+            + "|\(disableUploaderFilter)|\(disableTagFilter)"
     }
 }
 

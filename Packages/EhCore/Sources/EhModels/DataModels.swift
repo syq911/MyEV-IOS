@@ -308,9 +308,11 @@ public struct TopListCategory: Sendable {
 public struct TopListItem: Sendable {
     public var text: String
     public var href: String?
+    /// 排行榜 Gallery 分类行附带的缩略图 URL（拿不到则为 nil）
+    public var thumb: String?
 
-    public init(text: String = "", href: String? = nil) {
-        self.text = text; self.href = href
+    public init(text: String = "", href: String? = nil, thumb: String? = nil) {
+        self.text = text; self.href = href; self.thumb = thumb
     }
 }
 

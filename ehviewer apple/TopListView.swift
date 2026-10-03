@@ -8,6 +8,7 @@
 import SwiftUI
 import EhModels
 import EhAPI
+import EhSettings
 
 struct TopListView: View {
     @State private var vm = TopListViewModel()
@@ -50,15 +51,16 @@ struct TopListView: View {
 
     private var topListContent: some View {
         VStack(spacing: 0) {
-            // 类别选择
-            Picker("类别", selection: $selectedCategory) {
-                ForEach(Array(vm.categoryNames.enumerated()), id: \.offset) { i, name in
-                    Text(name).tag(i)
+            // 类别选择 —— 横向可滚动，避免一行放不下被省略号截断
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(vm.categoryNames.enumerated()), id: \.offset) { i, name in
+                        categoryChip(index: i, name: name)
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
             .disabled(vm.categoryNames.isEmpty)
 
             // 时间维度选择
@@ -91,25 +93,7 @@ struct TopListView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                let items = vm.items(for: selectedCategory, period: selectedPeriod)
-                List(items.indices, id: \.self) { idx in
-                    let item = items[idx]
-                    if let parsed = Self.parseGalleryHref(item.href) {
-                        NavigationLink {
-                            GalleryDetailView(gallery: GalleryInfo(
-                                gid: parsed.gid,
-                                token: parsed.token,
-                                title: item.text
-                            ))
-                            .id(parsed.gid)
-                        } label: {
-                            TopListRow(rank: idx + 1, item: item)
-                        }
-                    } else {
-                        TopListRow(rank: idx + 1, item: item)
-                    }
-                }
-                .listStyle(.plain)
+                topListBody
             }
         }
         .navigationTitle("排行榜")
@@ -119,6 +103,88 @@ struct TopListView: View {
             }
         }
         .task { await vm.load() }
+    }
+
+    /// 当前选中的分类名
+    private var currentCategoryName: String {
+        guard selectedCategory >= 0, selectedCategory < vm.categoryNames.count else { return "" }
+        return vm.categoryNames[selectedCategory]
+    }
+
+    /// 是否 Gallery 分类 —— 只有它用画廊行样式展示（左封面 + 右文字信息）
+    private var isGalleryCategory: Bool { currentCategoryName == "Gallery" }
+
+    /// 分类选择胶囊（横向滚动，放得下全部分类）
+    private func categoryChip(index: Int, name: String) -> some View {
+        let selected = selectedCategory == index
+        return Button {
+            selectedCategory = index
+        } label: {
+            Text(name)
+                .font(.subheadline)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(selected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12)))
+                .overlay(Capsule().stroke(selected ? Color.accentColor : Color.clear, lineWidth: 1))
+                .foregroundStyle(selected ? Color.accentColor : Color.primary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var topListBody: some View {
+        let items = vm.items(for: selectedCategory, period: selectedPeriod)
+        List(items.indices, id: \.self) { idx in
+            let item = items[idx]
+            if isGalleryCategory, let parsed = Self.parseGalleryHref(item.href) {
+                // Gallery 分类：复用「热门」的画廊行 (左封面 + 右文字信息)
+                NavigationLink {
+                    GalleryDetailView(gallery: galleryInfo(item, parsed: parsed))
+                        .id(parsed.gid)
+                } label: {
+                    GalleryRow(
+                        gallery: galleryInfo(item, parsed: parsed),
+                        showJpnTitle: AppSettings.shared.showJpnTitle,
+                        fixThumbUrl: AppSettings.shared.fixThumbUrl
+                    )
+                }
+            } else if isGalleryCategory {
+                // Gallery 分类但链接解析失败 —— 退化为纯文本行
+                TopListRow(rank: idx + 1, item: item)
+            } else {
+                // 其它分类 (Uploader / Tagging / ...)：点击用搜索逻辑打开对应内容
+                NavigationLink {
+                    searchDestination(for: item)
+                } label: {
+                    TopListRow(rank: idx + 1, item: item)
+                }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    private func galleryInfo(_ item: TopListItem, parsed: (gid: Int64, token: String)) -> GalleryInfo {
+        GalleryInfo(gid: parsed.gid, token: parsed.token, title: item.text, thumb: item.thumb)
+    }
+
+    /// 非 Gallery 分类点击后的跳转目标：上传者走上传者搜索，其余走关键词搜索
+    @ViewBuilder
+    private func searchDestination(for item: TopListItem) -> some View {
+        if let uploader = Self.uploaderName(from: item.href) {
+            GalleryListView(mode: .uploader(keyword: uploader), isPushed: true)
+        } else {
+            GalleryListView(mode: .search(keyword: item.text), isPushed: true)
+        }
+    }
+
+    /// 从 /uploader/<name> 形式的 href 里取出上传者名
+    private static func uploaderName(from href: String?) -> String? {
+        guard let href, let r = href.range(of: "/uploader/") else { return nil }
+        let rest = href[r.upperBound...]
+        let name = rest.split(separator: "/").first.map(String.init) ?? ""
+        let decoded = name.removingPercentEncoding ?? name
+        return decoded.isEmpty ? nil : decoded
     }
 }
 

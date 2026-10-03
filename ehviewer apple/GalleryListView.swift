@@ -39,7 +39,7 @@ struct GalleryListView: View {
     @State private var viewModel = GalleryListViewModel()
     @State private var showQuickSearch = false
     @State private var showTagSelector = false
-    @State private var advancedSearch = AdvancedSearchState()
+    @State private var advancedSearch = AdvancedSearchState.load()
     @State private var selectedQuickSearch: QuickSearchRecord?
     @State private var selectedGallery: GalleryInfo?
     @FocusState private var isSearchFocused: Bool
@@ -200,6 +200,10 @@ struct GalleryListView: View {
         .onReceive(NotificationCenter.default.publisher(for: GalleryActionService.siteChangedNotification)) { _ in
             // 站点切换后清除缓存并重新加载 (对齐 Android: 切换站点 → 刷新列表)
             viewModel.refresh(mode: mode)
+        }
+        // 记住搜索选项（分类/语言/最低评分/筛选开关等），下次点开搜索不再被重置
+        .onChange(of: advancedSearch.persistSignature) { _, _ in
+            advancedSearch.save()
         }
     }
 

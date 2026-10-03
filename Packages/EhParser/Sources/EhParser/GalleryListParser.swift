@@ -503,25 +503,31 @@ public enum GalleryListParser {
     private static func parseTopListItems(_ element: Element) -> [TopListItem] {
         var items: [TopListItem] = []
         // Android: element.child(1).child(0) 获取表格，然后 .getElementsByClass("tun")
-        guard let table = try? element.select("table").first() else {
+        let tunElements: [Element]
+        if let table = try? element.select("table").first(),
+           let list = try? table.select(".tun") {
+            tunElements = list.array()
+        } else if let list = try? element.select(".tun") {
             // 尝试直接在子层级找
-            guard let tunElements = try? element.select(".tun") else { return [] }
-            for tun in tunElements {
-                guard let a = try? tun.select("a").first() else { continue }
-                let value = (try? a.text()) ?? ""
-                let href = (try? a.attr("href")) ?? ""
-                items.append(TopListItem(text: value, href: href))
-            }
-            return items
+            tunElements = list.array()
+        } else {
+            tunElements = []
         }
-
-        guard let tunElements = try? table.select(".tun") else { return [] }
         for tun in tunElements {
             guard let a = try? tun.select("a").first() else { continue }
             let value = (try? a.text()) ?? ""
             let href = (try? a.attr("href")) ?? ""
-            items.append(TopListItem(text: value, href: href))
+            items.append(TopListItem(text: value, href: href, thumb: thumbURL(in: tun)))
         }
         return items
+    }
+
+    /// 取排行榜行里的缩略图（只有 Gallery 分类的行才有；懒加载可能是 data-src）
+    private static func thumbURL(in element: Element) -> String? {
+        guard let img = try? element.select("img").first() else { return nil }
+        for key in ["data-src", "data-original", "src"] {
+            if let value = try? img.attr(key), !value.isEmpty { return value }
+        }
+        return nil
     }
 }

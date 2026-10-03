@@ -62,6 +62,9 @@ struct DownloadsView: View {
     // MARK: - 阅读器 (fullScreenCover 呈现，隐藏导航栏)
     @State private var readerGallery: GalleryInfo?
 
+    // MARK: - 详情页导航 (点右侧文字信息进入画廊详情)
+    @State private var navPath = NavigationPath()
+
     // MARK: - 存储信息
     @State private var gallerySizes: [Int64: Int64] = [:]  // gid -> bytes
     @State private var totalStorageSize: Int64 = 0
@@ -69,7 +72,7 @@ struct DownloadsView: View {
     @State private var readingProgress: [Int64: Int] = [:]  // gid -> page index
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navPath) {
             VStack(spacing: 0) {
                 // 标签选择栏
                 labelPicker
@@ -105,6 +108,18 @@ struct DownloadsView: View {
                 ToolbarItem(placement: .automatic) {
                     mainToolbarMenu
                 }
+            }
+            // 点右侧文字信息 → 画廊详情页 (对齐 Android: 下载列表点条目进详情)
+            .navigationDestination(for: GalleryInfo.self) { gallery in
+                GalleryDetailView(gallery: gallery)
+                    .id(gallery.gid)
+            }
+            // 详情页里点标签/上传者 → 对应搜索列表
+            .navigationDestination(for: TagSearchDestination.self) { dest in
+                GalleryListView(mode: .tag(keyword: dest.tag), isPushed: true)
+            }
+            .navigationDestination(for: UploaderSearchDestination.self) { dest in
+                GalleryListView(mode: .uploader(keyword: dest.uploader), isPushed: true)
             }
             // 批量移动标签 Sheet
             .sheet(isPresented: $showMoveLabelSheet) {
@@ -676,52 +691,46 @@ struct DownloadsView: View {
         List {
             ForEach(filteredTasks, id: \.gallery.gid) { task in
                 if isSelectMode {
-                    Button {
-                        toggleSelection(gid: task.gallery.gid)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: selectedGids.contains(task.gallery.gid) ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .foregroundStyle(selectedGids.contains(task.gallery.gid) ? Color.accentColor : Color.secondary)
+                    HStack(spacing: 12) {
+                        Image(systemName: selectedGids.contains(task.gallery.gid) ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundStyle(selectedGids.contains(task.gallery.gid) ? Color.accentColor : Color.secondary)
 
-                            DownloadTaskRow(
-                                task: task,
-                                readingPage: readingProgress[task.gallery.gid],
-                                storageSize: gallerySizes[task.gallery.gid]
-                            ) {
-                                vm.pauseTask(gid: task.gallery.gid)
-                            } onResume: {
-                                vm.resumeTask(gid: task.gallery.gid)
-                            } onRequestDelete: {
-                                deletingTaskGid = task.gallery.gid
-                                showSingleDeleteConfirm = true
-                            } onShare: {
-                                Task { await shareGallery(task.gallery) }
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    // 点击打开阅读器 (使用 fullScreenCover 避免导航栏残留)
-                    Button {
-                        readerGallery = task.gallery
-                    } label: {
                         DownloadTaskRow(
                             task: task,
                             readingPage: readingProgress[task.gallery.gid],
-                            storageSize: gallerySizes[task.gallery.gid]
-                        ) {
-                            vm.pauseTask(gid: task.gallery.gid)
-                        } onResume: {
-                            vm.resumeTask(gid: task.gallery.gid)
-                        } onRequestDelete: {
+                            storageSize: gallerySizes[task.gallery.gid],
+                            isSelectionMode: true,
+                            onOpenReader: {},
+                            onOpenDetail: {},
+                            onPause: { vm.pauseTask(gid: task.gallery.gid) },
+                            onResume: { vm.resumeTask(gid: task.gallery.gid) },
+                            onRequestDelete: {
+                                deletingTaskGid = task.gallery.gid
+                                showSingleDeleteConfirm = true
+                            },
+                            onShare: { Task { await shareGallery(task.gallery) } }
+                        )
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleSelection(gid: task.gallery.gid) }
+                } else {
+                    // 点预览图 → 阅读器；点右侧文字信息 → 画廊详情页
+                    DownloadTaskRow(
+                        task: task,
+                        readingPage: readingProgress[task.gallery.gid],
+                        storageSize: gallerySizes[task.gallery.gid],
+                        isSelectionMode: false,
+                        onOpenReader: { readerGallery = task.gallery },
+                        onOpenDetail: { navPath.append(task.gallery) },
+                        onPause: { vm.pauseTask(gid: task.gallery.gid) },
+                        onResume: { vm.resumeTask(gid: task.gallery.gid) },
+                        onRequestDelete: {
                             deletingTaskGid = task.gallery.gid
                             showSingleDeleteConfirm = true
-                        } onShare: {
-                            Task { await shareGallery(task.gallery) }
-                        }
-                    }
-                    .buttonStyle(.plain)
+                        },
+                        onShare: { Task { await shareGallery(task.gallery) } }
+                    )
                 }
             }
         }
@@ -911,10 +920,33 @@ struct DownloadsView: View {
 
 // MARK: - Download Task Row
 
+/// 仅在非选择模式下给子区域挂点击手势（选择模式由父视图整行处理）
+private struct RowTapZone: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
 struct DownloadTaskRow: View {
     let task: DownloadTask
     let readingPage: Int?      // 阅读进度 (当前页索引)
     let storageSize: Int64?    // 画廊占用空间 (字节)
+    /// 选择模式：整行点击由父视图处理，子区域不再挂手势
+    var isSelectionMode: Bool = false
+    /// 点预览图 → 阅读器
+    var onOpenReader: () -> Void = {}
+    /// 点右侧文字信息 → 画廊详情页
+    var onOpenDetail: () -> Void = {}
     let onPause: () -> Void
     let onResume: () -> Void
     let onRequestDelete: () -> Void   // 请求删除 (由父视图处理确认)
@@ -922,7 +954,7 @@ struct DownloadTaskRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // 封面
+            // 封面 → 点击进阅读器
             CachedAsyncImage(url: URL(string: task.gallery.thumb ?? "")) { img in
                 img.resizable().aspectRatio(contentMode: .fill)
             } placeholder: {
@@ -930,6 +962,7 @@ struct DownloadTaskRow: View {
             }
             .frame(width: 52, height: 72)
             .clipShape(RoundedRectangle(cornerRadius: 4))
+            .modifier(RowTapZone(enabled: !isSelectionMode, action: onOpenReader))
 
             VStack(alignment: .leading, spacing: 5) {
                 // 标题
@@ -992,10 +1025,12 @@ struct DownloadTaskRow: View {
                             Text("\(Int(downloadProgress * 100))%")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(RowTapZone(enabled: !isSelectionMode, action: onOpenDetail))
         }
         .contentShape(Rectangle())
         .contextMenu {
