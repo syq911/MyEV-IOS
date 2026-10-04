@@ -42,6 +42,9 @@ struct ImageReaderView: View {
     @State private var isZoomed = false
     @State private var showTutorial = false
 
+    /// 漫画翻译编排器（识别 → 翻译 → 排版）
+    @State private var translate = MangaTranslationController()
+
     // 跳页输入
     @State private var showJumpPageAlert = false
     @State private var jumpPageText = ""
@@ -147,6 +150,9 @@ struct ImageReaderView: View {
                 // 浮动导航按钮 (工具栏隐藏时显示，提供翻页+工具栏切换)
                 floatingNavigationOverlay(geometry: geometry)
 
+                // 翻译进度 / 失败提示
+                translationStatusOverlay
+
                 // 新手教程
                 if showTutorial {
                     readerTutorialOverlay(geometry: geometry)
@@ -173,6 +179,10 @@ struct ImageReaderView: View {
         #endif
         .onAppear(perform: setupReader)
         .onDisappear(perform: cleanupReader)
+        // Apple 端上翻译：configuration 非 nil 时由系统提供 session 执行
+        .translationTask(translate.appleBridge.configuration) { session in
+            await translate.appleBridge.run(session: session)
+        }
         .task {
             await initializeReader()
             // Fix F2-2: 只有真正打开阅读器才记录历史 (从详情页 loadDetail 迁移到这里)
@@ -1002,9 +1012,11 @@ struct ImageReaderView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let cachedImage = vm.cachedImages[index] {
+                // 翻译可见且该页已有译文时显示译文图，否则原图
+                let displayedImage = translate.displayImage(gid: vm.gid, page: index, original: cachedImage) ?? cachedImage
                 #if os(iOS)
                 SwiftUIZoomableImage(
-                    image: cachedImage,
+                    image: displayedImage,
                     isFullPage: true,
                     onSingleTap: { location, viewSize in
                         handleTapZone(location: location, viewSize: viewSize)
@@ -1015,7 +1027,7 @@ struct ImageReaderView: View {
                 )
                 #else
                 ZoomableImageView(
-                    image: cachedImage,
+                    image: displayedImage,
                     scaleMode: scaleMode,
                     startPosition: startPosition,
                     allowsHorizontalScrollAtMinZoom: readingDirection == .topToBottom,
@@ -1309,6 +1321,31 @@ struct ImageReaderView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
 
+            // 漫画翻译
+            if MangaTranslationSettings.shared.enabled {
+                Menu {
+                    Button {
+                        startTranslateCurrentPage()
+                    } label: {
+                        Label("翻译本页", systemImage: "translate")
+                    }
+                    .disabled(translate.stage.isBusy || vm.cachedImages[vm.currentPage] == nil)
+                    if translate.hasTranslation(gid: vm.gid, page: vm.currentPage) {
+                        Button {
+                            translate.toggleVisible()
+                        } label: {
+                            Label(translate.visible ? "显示原文" : "显示译文", systemImage: "rectangle.on.rectangle")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "translate")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .padding(10)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+            }
+
             // 设置
             Button(action: { showSettings = true }) {
                 Image(systemName: "gearshape")
@@ -1320,6 +1357,48 @@ struct ImageReaderView: View {
         }
         .padding(.horizontal)
         .padding(.top, 50)
+    }
+
+    /// 翻译当前页
+    private func startTranslateCurrentPage() {
+        guard MangaTranslationSettings.shared.enabled else { return }
+        guard let image = vm.cachedImages[vm.currentPage] else { return }
+        translate.translatePage(gid: vm.gid, page: vm.currentPage, image: image)
+    }
+
+    /// 翻译进度 / 失败提示浮层
+    @ViewBuilder
+    private var translationStatusOverlay: some View {
+        switch translate.stage {
+        case .recognizing, .translating, .rendering:
+            VStack(spacing: 8) {
+                ProgressView().tint(.white)
+                Text(translate.stage.label)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+            }
+            .padding(14)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.top, 120)
+            .frame(maxHeight: .infinity, alignment: .top)
+        case .failed(let message):
+            Button {
+                translate.acknowledge()
+            } label: {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(12)
+                    .background(.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 40)
+            .padding(.top, 120)
+            .frame(maxHeight: .infinity, alignment: .top)
+        default:
+            EmptyView()
+        }
     }
 
     private var bottomBar: some View {

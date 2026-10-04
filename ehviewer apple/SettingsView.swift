@@ -548,6 +548,11 @@ struct SettingsView: View {
 
     private var readingSection: some View {
         Section("阅读") {
+            // 漫画翻译（页内翻译）
+            NavigationLink("漫画翻译") {
+                MangaTranslationSettingsView()
+            }
+
             // 阅读方向 (对齐 Android Settings.KEY_READING_DIRECTION)
             Picker("阅读方向", selection: Binding(
                 get: { AppSettings.shared.readingDirection },
