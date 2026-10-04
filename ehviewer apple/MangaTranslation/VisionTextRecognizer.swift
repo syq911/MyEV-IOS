@@ -4,13 +4,16 @@
 //
 //  Apple Vision OCR —— 输出带位置与竖/横排方向的文本行
 //
-//  设计要点（针对真机「漏行 / 精度低」）：
-//  1. **放大**：识别前把页面（或裁块）放大到目标长边 —— 字号变大后小字召回显著提升，
-//     这也是「截图识字」比「直接识别页图」更准的根本原因（截屏里字号更大）。
-//  2. **分块**：把整页切成带重叠的小块，每块放大得更多，密集页面召回大幅提升。
-//  3. **多策略合并**：整页 / 横向压扁（规避 iOS 27 已知的「漏行」回归）/ 多语言 / 分块，
-//     结果按 IoU 去重合并，取长补短。
-//  4. **全程 diag() 打点**：量化每个策略命中多少行，便于定位。
+//  策略：**原图直接识别**，并把两套 Vision 文本 API 的结果合并去重：
+//  1. 现代 Swift API `RecognizeTextRequest`（iOS 18+，与系统「实况文本 / 快捷指令截图识字」同源）
+//     —— 开启自动语言检测，最接近系统原生识别效果；
+//  2. 传统 `VNRecognizeTextRequest`（指定语言），作为补充。
+//
+//  不做放大 / 分块 / 缩放等重采样：放大只是插值、不会增加真实细节，分块会把整行切在块边界
+//  并丢失整页版式上下文。两套 API 都直接吃原始位图，合并只增加召回、不覆盖彼此结果。
+//
+//  唯一的例外是可选的「漏行兜底」：iOS 27 上 Vision 有已知的整页漏行回归（Apple 论坛多例），
+//  当合并后命中过少时，把整页横向压扁重试一次并合并。该步骤可在设置中关闭。
 //
 
 import Foundation
@@ -21,41 +24,19 @@ import EhModels
 
 struct VisionTextRecognizer {
 
-    // MARK: 配置
-
     /// 识别语言（BCP-47，如 "ja-JP" / "zh-Hans"）
     var languages: [String]
-    /// 语言纠错。CJK 必须开启，否则可能零观测。
+    /// 语言纠错。中日文必须开启，否则可能零观测。
     var usesLanguageCorrection: Bool = true
-    /// 是否分块识别（密集页面提升小字召回）
-    var usesTiling: Bool = true
-    /// 识别前把（裁块）放大的目标长边像素
-    var targetLongSide: CGFloat = 2200
-    /// 分块时每块在「原图坐标」下的目标长边
-    var tileLongSide: CGFloat = 1100
-    /// 分块之间的重叠比例（避免把整行文字切在块边界）
-    var tileOverlap: CGFloat = 0.20
-    /// 整页策略命中行数达到该值即认为「识别充分」，跳过其余策略
-    var satisfiedLineCount: Int = 12
+    /// 合并后命中行数低于该值时，可选触发「漏行兜底」（iOS 27 兼容）
+    var lineDropFallbackThreshold: Int = 3
+    /// 是否启用漏行兜底
+    var usesLineDropFallback: Bool = true
 
     /// 兜底用的通用多语言集合
     static let broadLanguages = ["ja-JP", "zh-Hans", "zh-Hant", "en-US"]
-
-    /// 渲染输出的长边上限（内存保护）
-    private static let renderLongSideCap: CGFloat = 4096
     /// 合并去重的 IoU 阈值
     static let mergeIoU: CGFloat = 0.4
-
-    // MARK: 策略
-
-    struct Strategy: Equatable {
-        var label: String
-        var level: VNRequestTextRecognitionLevel
-        var usesLanguageCorrection: Bool
-        var languages: [String]
-        /// 横向压扁系数：1.0 = 不变，<1 = 压扁（iOS 27 漏行回归的规避手段）
-        var squashWidth: CGFloat
-    }
 
     // MARK: 主入口
 
@@ -63,156 +44,129 @@ struct VisionTextRecognizer {
         in cgImage: CGImage,
         orientation: CGImagePropertyOrientation = .up
     ) async throws -> [MangaTextLine] {
-        let pageSize = CGSize(width: cgImage.width, height: cgImage.height)
-        let pageAspect = pageSize.width / max(1, pageSize.height)
-        diag("MangaTr/OCR: 原图 \(cgImage.width)x\(cgImage.height) 语言=\(languages) 分块=\(usesTiling)")
+        let pageAspect = CGFloat(cgImage.width) / CGFloat(max(1, cgImage.height))
+        diag("MangaTr/OCR: 原图直出 \(cgImage.width)x\(cgImage.height) 语言=\(languages) 兜底=\(usesLineDropFallback)")
 
         var groups: [[MangaTextLine]] = []
         var firstError: Error?
         var sawSuccess = false
 
-        func record(_ result: Result<[MangaTextLine], Error>, label: String) -> [MangaTextLine] {
-            switch result {
-            case .success(let lines):
+        // 1) 现代 Vision API（与「实况文本 / 快捷指令截图识字」同源），自动检测语言
+        do {
+            let lines = try await runModern(on: cgImage, pageAspect: pageAspect)
+            sawSuccess = true
+            diag("MangaTr/OCR[现代API·自动语言] → 行=\(lines.count)")
+            groups.append(lines)
+        } catch {
+            if firstError == nil { firstError = error }
+            diag("MangaTr/OCR[现代API] 抛错 —— \(error)")
+        }
+
+        // 2) 传统 Vision API，指定语言
+        do {
+            let lines = try runLegacy(on: cgImage, languages: languages,
+                                      pageAspect: pageAspect, orientation: orientation)
+            sawSuccess = true
+            diag("MangaTr/OCR[传统API·\(languages)] → 行=\(lines.count)")
+            groups.append(lines)
+        } catch {
+            if firstError == nil { firstError = error }
+            diag("MangaTr/OCR[传统API] 抛错 —— \(error)")
+        }
+
+        // 2b) 传统 Vision API，不指定语言（沿用系统偏好语言）——与「快捷指令截图识字」一致的行为
+        do {
+            let lines = try runLegacy(on: cgImage, languages: nil,
+                                      pageAspect: pageAspect, orientation: orientation)
+            sawSuccess = true
+            diag("MangaTr/OCR[传统API·系统语言] → 行=\(lines.count)")
+            groups.append(lines)
+        } catch {
+            if firstError == nil { firstError = error }
+            diag("MangaTr/OCR[传统API·系统语言] 抛错 —— \(error)")
+        }
+
+        // 3) 指定语言为空时补一次通用多语言（传统 API）
+        if groups.flatMap({ $0 }).isEmpty, languages != Self.broadLanguages {
+            do {
+                let lines = try runLegacy(on: cgImage, languages: Self.broadLanguages,
+                                          pageAspect: pageAspect, orientation: orientation)
                 sawSuccess = true
-                diag("MangaTr/OCR[\(label)] → 行=\(lines.count)")
-                return lines
-            case .failure(let error):
+                diag("MangaTr/OCR[传统API·多语言] → 行=\(lines.count)")
+                groups.append(lines)
+            } catch {
                 if firstError == nil { firstError = error }
-                diag("MangaTr/OCR[\(label)] 抛错 —— \(error)")
-                return []
-            }
-        }
-
-        let fullRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
-
-        // 1) 整页（含放大）
-        let fullStrategy = Strategy(label: "整页", level: .accurate,
-                                    usesLanguageCorrection: usesLanguageCorrection,
-                                    languages: languages, squashWidth: 1.0)
-        let fullLines = record(Result { try runPass(page: cgImage, region: fullRegion, strategy: fullStrategy,
-                                                    pageAspect: pageAspect, orientation: orientation) },
-                               label: "整页")
-        groups.append(fullLines)
-
-        if fullLines.count >= satisfiedLineCount {
-            let merged = Self.merge(groups)
-            diag("MangaTr/OCR: 整页已充分(\(merged.count)行)，跳过其余策略")
-            return merged
-        }
-
-        // 2) 横向压扁：规避 iOS 27「整页漏行」回归
-        let squashStrategy = Strategy(label: "压扁0.8", level: .accurate,
-                                      usesLanguageCorrection: usesLanguageCorrection,
-                                      languages: languages, squashWidth: 0.8)
-        let squashed = record(Result { try runPass(page: cgImage, region: fullRegion, strategy: squashStrategy,
-                                                   pageAspect: pageAspect, orientation: orientation) },
-                              label: "压扁0.8")
-        if !squashed.isEmpty { groups.append(squashed) }
-
-        // 3) 指定语言识别为空时，补一次通用多语言
-        if fullLines.isEmpty, languages != Self.broadLanguages {
-            let multiStrategy = Strategy(label: "多语言", level: .accurate,
-                                         usesLanguageCorrection: true,
-                                         languages: Self.broadLanguages, squashWidth: 1.0)
-            groups.append(record(Result { try runPass(page: cgImage, region: fullRegion, strategy: multiStrategy,
-                                                      pageAspect: pageAspect, orientation: orientation) },
-                                 label: "多语言"))
-        }
-
-        // 4) 分块
-        if usesTiling {
-            let tiles = Self.tileRects(pageSize: pageSize, tileLongSide: tileLongSide, overlap: tileOverlap)
-            if tiles.count > 1 {
-                let tileStrategy = Strategy(label: "分块", level: .accurate,
-                                            usesLanguageCorrection: usesLanguageCorrection,
-                                            languages: languages, squashWidth: 1.0)
-                var tileLines: [MangaTextLine] = []
-                for tile in tiles {
-                    let region = Self.normalizedRect(tile, pageSize: pageSize)
-                    tileLines.append(contentsOf: record(
-                        Result { try runPass(page: cgImage, region: region, strategy: tileStrategy,
-                                             pageAspect: pageAspect, orientation: orientation) },
-                        label: "分块块"))
-                }
-                diag("MangaTr/OCR[分块] \(tiles.count)块 → 行=\(tileLines.count)")
-                groups.append(tileLines)
+                diag("MangaTr/OCR[传统API·多语言] 抛错 —— \(error)")
             }
         }
 
         var merged = Self.merge(groups)
-        diag("MangaTr/OCR: 合并去重 → 行=\(merged.count)")
+        diag("MangaTr/OCR: 合并去重 → 行=\(merged.count) 示例=\(merged.prefix(4).map(\.text))")
 
-        // 5) 兜底：fast
-        if merged.isEmpty {
-            let fastStrategy = Strategy(label: "fast兜底", level: .fast,
-                                        usesLanguageCorrection: true,
-                                        languages: Self.broadLanguages, squashWidth: 1.0)
-            merged = record(Result { try runPass(page: cgImage, region: fullRegion, strategy: fastStrategy,
-                                                 pageAspect: pageAspect, orientation: orientation) },
-                            label: "fast兜底")
+        // 4) 漏行兜底（iOS 27 已知回归）：仅在命中过少时触发，且与现有结果合并
+        if usesLineDropFallback, merged.count < lineDropFallbackThreshold,
+           let squashed = Self.squashHorizontally(cgImage, factor: 0.8) {
+            do {
+                let lines = try runLegacy(on: squashed, languages: languages,
+                                          pageAspect: pageAspect, orientation: orientation)
+                diag("MangaTr/OCR[压扁0.8兜底] → 行=\(lines.count)")
+                merged = Self.merge([merged, lines])
+            } catch {
+                diag("MangaTr/OCR[压扁0.8兜底] 抛错 —— \(error)")
+            }
         }
 
         if merged.isEmpty, !sawSuccess, let firstError { throw firstError }
-        diag("MangaTr/OCR: 最终 \(merged.count) 行 示例=\(merged.prefix(4).map(\.text))")
         return merged
     }
 
-    // MARK: - 单次识别
+    // MARK: - 现代 Vision API（iOS 18+）
 
-    private func runPass(
-        page: CGImage,
-        region: CGRect,
-        strategy: Strategy,
+    private func runModern(on image: CGImage, pageAspect: CGFloat) async throws -> [MangaTextLine] {
+        var request = RecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = usesLanguageCorrection
+        request.automaticallyDetectsLanguage = true
+
+        let observations = try await request.perform(on: image)
+        var lines: [MangaTextLine] = []
+        for observation in observations {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let box = observation.boundingBox.cgRect   // 归一化，原点左下
+            guard box.width > 0, box.height > 0 else { continue }
+            let vertical = Self.isVertical(box: box, text: text, pageAspect: pageAspect)
+            lines.append(MangaTextLine(text: text, boundingBox: box, isVertical: vertical,
+                                       confidence: Float(candidate.confidence)))
+        }
+        return lines
+    }
+
+    // MARK: - 传统 Vision API
+
+    private func runLegacy(
+        on image: CGImage,
+        languages: [String]?,
         pageAspect: CGFloat,
         orientation: CGImagePropertyOrientation
     ) throws -> [MangaTextLine] {
-        guard let rendering = Self.render(page: page, region: region, targetLongSide: targetLongSide,
-                                          squashWidth: strategy.squashWidth) else {
-            return []
-        }
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = strategy.level
-        request.recognitionLanguages = strategy.languages
-        request.usesLanguageCorrection = strategy.usesLanguageCorrection
+        request.recognitionLevel = .accurate
+        if let languages, !languages.isEmpty {
+            request.recognitionLanguages = languages
+        }
+        request.usesLanguageCorrection = usesLanguageCorrection
 
-        let handler = VNImageRequestHandler(cgImage: rendering.image, orientation: orientation, options: [:])
+        let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
         try handler.perform([request])
-        return Self.lines(from: request.results ?? [], toPage: rendering.toPage, pageAspect: pageAspect)
+        return Self.lines(from: request.results ?? [], pageAspect: pageAspect)
     }
 
-    // MARK: - 渲染（放大 / 压扁 / 裁块）
-
-    private struct Rendering {
-        let image: CGImage
-        /// 归一化(图内, 原点左下) → 归一化(整页, 原点左下)
-        let toPage: (CGRect) -> CGRect
-    }
-
-    /// 从整页里按归一化区域裁一块，放大到目标长边，可选横向压扁。
-    ///
-    /// 关键不变式：**归一化坐标在纯缩放/压扁下保持不变**，所以整页策略无需重映射；
-    /// 只有「裁块」才需要用区域反推回整页坐标。
-    private static func render(
-        page: CGImage,
-        region: CGRect,
-        targetLongSide: CGFloat,
-        squashWidth: CGFloat
-    ) -> Rendering? {
-        let width = CGFloat(page.width)
-        let height = CGFloat(page.height)
-        let regionPixelW = region.width * width
-        let regionPixelH = region.height * height
-        guard regionPixelW >= 1, regionPixelH >= 1 else { return nil }
-
-        let maxSide = max(regionPixelW, regionPixelH)
-        var scale = targetLongSide / maxSide
-        scale = min(scale, renderLongSideCap / maxSide)
-        scale = max(scale, 0.2)
-
-        let outW = max(1, Int((regionPixelW * scale * squashWidth).rounded()))
-        let outH = max(1, Int((regionPixelH * scale).rounded()))
-
+    /// 漏行兜底专用：把整页按横向系数压扁（纯缩放，归一化坐标不变，无需回映射）
+    private static func squashHorizontally(_ cgImage: CGImage, factor: CGFloat) -> CGImage? {
+        let outW = max(1, Int((CGFloat(cgImage.width) * factor).rounded()))
+        let outH = max(1, cgImage.height)
         guard let context = CGContext(
             data: nil, width: outW, height: outH,
             bitsPerComponent: 8, bytesPerRow: 0,
@@ -220,27 +174,14 @@ struct VisionTextRecognizer {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
         context.interpolationQuality = .high
-
-        let drawW = width * scale * squashWidth
-        let drawH = height * scale
-        context.draw(page, in: CGRect(x: -region.minX * drawW, y: -region.minY * drawH,
-                                      width: drawW, height: drawH))
-        guard let out = context.makeImage() else { return nil }
-
-        let toPage: (CGRect) -> CGRect = { box in
-            CGRect(x: region.minX + box.minX * region.width,
-                   y: region.minY + box.minY * region.height,
-                   width: box.width * region.width,
-                   height: box.height * region.height)
-        }
-        return Rendering(image: out, toPage: toPage)
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: outW, height: outH))
+        return context.makeImage()
     }
 
     // MARK: - 观测 → 文本行
 
     static func lines(
         from observations: [VNRecognizedTextObservation],
-        toPage: (CGRect) -> CGRect,
         pageAspect: CGFloat
     ) -> [MangaTextLine] {
         var lines: [MangaTextLine] = []
@@ -248,7 +189,7 @@ struct VisionTextRecognizer {
             guard let candidate = observation.topCandidates(1).first else { continue }
             let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
-            let box = toPage(observation.boundingBox)   // 归一化，原点左下
+            let box = observation.boundingBox   // 归一化，原点左下
             guard box.width > 0, box.height > 0 else { continue }
             let vertical = isVertical(box: box, text: text, pageAspect: pageAspect)
             lines.append(MangaTextLine(text: text, boundingBox: box, isVertical: vertical,
@@ -265,47 +206,9 @@ struct VisionTextRecognizer {
         return box.height > box.width * 1.6 * max(0.05, pageAspect)
     }
 
-    // MARK: - 分块 / 合并（纯逻辑，可单测）
+    // MARK: - 合并（纯逻辑，可单测）
 
-    /// 把整页切成带重叠、均匀铺满的方块（像素坐标，原点左下）
-    static func tileRects(pageSize: CGSize, tileLongSide: CGFloat, overlap: CGFloat) -> [CGRect] {
-        let width = Int(pageSize.width.rounded())
-        let height = Int(pageSize.height.rounded())
-        guard width > 0, height > 0, tileLongSide > 0 else { return [] }
-
-        let cols = max(1, Int(ceil(Double(width) / Double(tileLongSide))))
-        let rows = max(1, Int(ceil(Double(height) / Double(tileLongSide))))
-        if cols * rows <= 1 { return [CGRect(x: 0, y: 0, width: width, height: height)] }
-
-        let overlap = min(max(overlap, 0), 0.6)
-        let tileW = min(width, Int(ceil(Double(width) / Double(cols) * (1 + overlap))))
-        let tileH = min(height, Int(ceil(Double(height) / Double(rows) * (1 + overlap))))
-
-        func origin(_ index: Int, count: Int, tile: Int, total: Int) -> Int {
-            guard count > 1 else { return 0 }
-            return Int((Double(total - tile) * Double(index) / Double(count - 1)).rounded())
-        }
-
-        var rects: [CGRect] = []
-        for row in 0..<rows {
-            for col in 0..<cols {
-                rects.append(CGRect(
-                    x: origin(col, count: cols, tile: tileW, total: width),
-                    y: origin(row, count: rows, tile: tileH, total: height),
-                    width: tileW, height: tileH
-                ))
-            }
-        }
-        return rects
-    }
-
-    static func normalizedRect(_ rect: CGRect, pageSize: CGSize) -> CGRect {
-        guard pageSize.width > 0, pageSize.height > 0 else { return rect }
-        return CGRect(x: rect.minX / pageSize.width, y: rect.minY / pageSize.height,
-                      width: rect.width / pageSize.width, height: rect.height / pageSize.height)
-    }
-
-    /// 合并多策略结果：IoU 超阈值视为同一行，保留置信度更高 / 更长的那条
+    /// 合并多次识别结果：IoU 超阈值视为同一行，保留置信度更高 / 更长的那条
     static func merge(_ groups: [[MangaTextLine]]) -> [MangaTextLine] {
         var result: [MangaTextLine] = []
         for line in groups.flatMap({ $0 }) {

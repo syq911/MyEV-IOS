@@ -73,8 +73,11 @@ final class MangaTranslationController {
                 throw MangaTranslationError.imageUnavailable
             }
             let languages = settings.sourceLanguage.visionLanguages
+            let usesLineDropFallback = settings.usesLineDropFallback
             let lines: [MangaTextLine] = try await Task.detached(priority: .userInitiated) {
-                try await VisionTextRecognizer(languages: languages).recognize(in: cgImage)
+                var recognizer = VisionTextRecognizer(languages: languages)
+                recognizer.usesLineDropFallback = usesLineDropFallback
+                return try await recognizer.recognize(in: cgImage)
             }.value
 
             try Task.checkCancellation()

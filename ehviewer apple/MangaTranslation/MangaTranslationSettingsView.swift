@@ -18,6 +18,7 @@ struct MangaTranslationSettingsView: View {
     @State private var baseURL = MangaTranslationSettings.shared.deepSeekBaseURL
     @State private var model = MangaTranslationSettings.shared.deepSeekModel
     @State private var apiKey = MangaTranslationSettings.shared.deepSeekAPIKey
+    @State private var lineDropFallback = MangaTranslationSettings.shared.usesLineDropFallback
 
     var body: some View {
         Form {
@@ -59,6 +60,17 @@ struct MangaTranslationSettingsView: View {
                         Text(t.label).tag(t)
                     }
                 }
+            }
+
+            Section {
+                Toggle("漏行兜底（iOS 27 兼容）", isOn: Binding(
+                    get: { lineDropFallback },
+                    set: { lineDropFallback = $0; MangaTranslationSettings.shared.usesLineDropFallback = $0 }
+                ))
+            } header: {
+                Text("识别")
+            } footer: {
+                Text("识别始终按「原图直接识别」进行，不做放大/分块。iOS 27 的 Vision 存在已知的整页漏行回归，开启此项后，当直接识别命中过少时会用横向压扁重试并合并结果（只会增加识别内容）。")
             }
 
             if provider == .deepSeek {

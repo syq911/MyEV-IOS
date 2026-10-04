@@ -147,6 +147,15 @@ final class MangaTranslationSettings: @unchecked Sendable {
         set { defaults.set(min(1.4, max(0.6, newValue)), forKey: "manga_tr_font_scale") }
     }
 
+    // MARK: OCR
+
+    /// 漏行兜底（iOS 27 兼容）：直接识别命中过少时，用横向压扁重试并合并。
+    /// 默认开启；关闭后只做「原图直接识别」。
+    var usesLineDropFallback: Bool {
+        get { defaults.object(forKey: "manga_tr_line_drop_fallback") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "manga_tr_line_drop_fallback") }
+    }
+
     // MARK: DeepSeek
 
     /// OpenAI 兼容端点根地址（默认官方 DeepSeek）
