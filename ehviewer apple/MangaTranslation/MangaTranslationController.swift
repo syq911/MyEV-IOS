@@ -7,6 +7,12 @@
 
 import Foundation
 import Observation
+import EhModels
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 
 @MainActor
 @Observable
@@ -58,10 +64,12 @@ final class MangaTranslationController {
 
     private func run(gid: Int64, page: Int, image: PlatformImage) async {
         let settings = MangaTranslationSettings.shared
+        diag("MangaTr: 开始翻译 gid=\(gid) page=\(page) provider=\(settings.provider.label) source=\(settings.sourceLanguage.label) target=\(settings.targetLanguage.label)")
         do {
             await setStage(.recognizing)
 
             guard let cgImage = MangaTypesetter.cgImage(of: image) else {
+                diag("MangaTr: 取 CGImage 失败 imageSize=\(image.size)")
                 throw MangaTranslationError.imageUnavailable
             }
             let languages = settings.sourceLanguage.visionLanguages
@@ -70,10 +78,15 @@ final class MangaTranslationController {
             }.value
 
             try Task.checkCancellation()
-            guard !lines.isEmpty else { throw MangaTranslationError.noTextRecognized }
+            guard !lines.isEmpty else {
+                diag("MangaTr: OCR 未识别到任何文字 → noTextRecognized")
+                throw MangaTranslationError.noTextRecognized
+            }
+            diag("MangaTr: OCR 完成 行数=\(lines.count)")
 
             await setStage(.translating)
             let texts = lines.map(\.text)
+            diag("MangaTr: 开始翻译 \(texts.count) 条，后端=\(settings.provider.label)")
             let translations = try await translate(
                 texts,
                 source: settings.sourceLanguage,
@@ -81,8 +94,10 @@ final class MangaTranslationController {
                 provider: settings.provider
             )
             guard translations.count == lines.count else {
+                diag("MangaTr: 译文条数不匹配 expected=\(lines.count) got=\(translations.count)")
                 throw MangaTranslationError.countMismatch(expected: lines.count, got: translations.count)
             }
+            diag("MangaTr: 翻译完成 \(translations.count) 条")
 
             try Task.checkCancellation()
             await setStage(.rendering)
@@ -104,10 +119,13 @@ final class MangaTranslationController {
 
             images[key(gid: gid, page: page)] = rendered
             visible = true
+            diag("MangaTr: 排版完成，页面已更新 gid=\(gid) page=\(page)")
             await setStage(.done)
         } catch is CancellationError {
+            diag("MangaTr: 已取消 gid=\(gid) page=\(page)")
             await setStage(.idle)
         } catch {
+            diag("MangaTr: 失败 gid=\(gid) page=\(page) —— \(error.localizedDescription)")
             await setStage(.failed(error.localizedDescription))
         }
     }

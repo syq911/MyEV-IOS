@@ -8,9 +8,37 @@
 import Testing
 import Foundation
 import CoreGraphics
+import CoreText
+import Vision
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 @testable import ehviewer_apple
 
 struct MangaTranslationTests {
+
+    // MARK: OCR 配置（纯逻辑）
+
+    @Test func plannedAttemptsCoverFallbacks() {
+        let attempts = VisionTextRecognizer.plannedAttempts(languages: ["ja-JP"])
+        // 至少包含：指定语言 + 通用多语言 + fast 兜底
+        #expect(attempts.count >= 2)
+        // 每次尝试都必须开启语言纠错（CJK 关闭纠错会零观测）
+        #expect(attempts.allSatisfy { $0.usesLanguageCorrection })
+        #expect(attempts.first?.languages == ["ja-JP"])
+        #expect(attempts.contains { $0.recognitionLevel == .fast })
+    }
+
+    @Test func plannedAttemptsDeduplicatesBroadLanguages() {
+        let attempts = VisionTextRecognizer.plannedAttempts(languages: VisionTextRecognizer.broadLanguages)
+        // 已经是通用集合时不再重复追加 identical 配置
+        let accurateBroad = attempts.filter {
+            $0.recognitionLevel == .accurate && $0.languages == VisionTextRecognizer.broadLanguages
+        }
+        #expect(accurateBroad.count == 1)
+    }
 
     // MARK: 竖排判定
 
@@ -86,5 +114,62 @@ struct MangaTranslationTests {
         #expect(throws: MangaTranslationError.self) {
             _ = try DeepSeekTranslator.parseTranslations("no array here", expected: 1)
         }
+    }
+
+    // MARK: 真实 Vision OCR 回归（覆盖历史「识别不到文字」）
+
+    /// 真机/模拟器上跑真实 Vision：横排英文
+    @Test func ocrRecognizesRenderedEnglish() async throws {
+        let image = try #require(makeTextImage("HELLO WORLD"))
+        let cgImage = try #require(MangaTypesetter.cgImage(of: image))
+        let lines = try await VisionTextRecognizer(languages: ["en-US"]).recognize(in: cgImage)
+        #expect(!lines.isEmpty)
+    }
+
+    /// 真机/模拟器上跑真实 Vision：竖排日语（历史 bug 就在这里——关闭纠错会零观测）
+    @Test func ocrRecognizesRenderedJapanese() async throws {
+        let image = try #require(makeTextImage("こんにちは"))
+        let cgImage = try #require(MangaTypesetter.cgImage(of: image))
+        let lines = try await VisionTextRecognizer(languages: ["ja-JP"]).recognize(in: cgImage)
+        #expect(!lines.isEmpty)
+    }
+
+    // MARK: 测试辅助
+
+    /// 把一段文字渲染成白底黑字的位图，供真实 OCR 用例使用
+    private func makeTextImage(_ text: String, fontSize: CGFloat = 120) -> PlatformImage? {
+        let width = 1000
+        let height = 320
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        // 用 CoreText 选取「能渲染该字符串」的回退字体（日文会回退到 Hiragino 等）
+        let baseFont = CTFontCreateUIFontForLanguage(.system, fontSize, nil)
+            ?? CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
+        let font = CTFontCreateForString(baseFont, text as CFString, CFRangeMake(0, text.utf16.count))
+        let attrs: [NSAttributedString.Key: Any] = [
+            kCTFontAttributeName as NSAttributedString.Key: font,
+            kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor(red: 0, green: 0, blue: 0, alpha: 1),
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        let bounds = CTLineGetBoundsWithOptions(line, [])
+        ctx.textPosition = CGPoint(
+            x: (CGFloat(width) - bounds.width) / 2,
+            y: (CGFloat(height) - bounds.height) / 2
+        )
+        CTLineDraw(line, ctx)
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+        #if canImport(UIKit)
+        return UIImage(cgImage: cgImage)
+        #else
+        return NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+        #endif
     }
 }

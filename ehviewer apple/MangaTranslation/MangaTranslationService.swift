@@ -26,7 +26,7 @@ enum MangaTranslationError: LocalizedError {
         case .http(let status, let body): return "翻译接口返回 \(status)：\(body)"
         case .emptyResponse: return "翻译结果为空或格式无法解析"
         case .countMismatch(let expected, let got): return "译文条数不匹配（期望 \(expected)，实际 \(got)）"
-        case .noTextRecognized: return "本页没有识别到文字"
+        case .noTextRecognized: return "本页没有识别到文字（可在设置里把源语言改为「日文」重试）"
         case .imageUnavailable: return "当前页图片尚未加载完成"
         case .cancelled: return "翻译已取消"
         }
