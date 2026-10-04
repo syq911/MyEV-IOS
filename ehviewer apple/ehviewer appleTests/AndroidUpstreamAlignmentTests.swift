@@ -15,6 +15,7 @@ import Testing
 import Foundation
 import EhModels
 import EhParser
+import EhSettings
 
 struct AndroidUpstreamAlignmentTests {
 
@@ -123,6 +124,36 @@ struct AndroidUpstreamAlignmentTests {
         #expect(throws: (any Error).self) {
             try GetEditCommentParser.parse(Data(json.utf8))
         }
+    }
+
+    // MARK: - 详情页点击标签 → 搜索关键词
+
+    /// 点击标签时**不能**把 `artist:aaa bbb` 直接当搜索词 —— 空格会被 E-Hentai
+    /// 当成词分隔符，拆成 `artist:aaa` 和 `bbb` 两个词。必须用 Android 同款语法重建：
+    /// 命名空间短前缀 + 引号包裹 + `$` 精确匹配。
+    @Test func tagKeywordQuotesSpacesWithNamespacePrefix() {
+        #expect(EhTagDatabase.rebuildKeyword("artist:aaa bbb") == "a:\"aaa bbb$\"")
+        #expect(EhTagDatabase.rebuildKeyword("female:big breasts") == "f:\"big breasts$\"")
+        #expect(EhTagDatabase.rebuildKeyword("language:chinese") == "l:chinese$")
+        #expect(EhTagDatabase.rebuildKeyword("misc:foo") == "foo$")
+    }
+
+    /// 无空格标签不额外加引号，但仍带命名空间前缀与 `$`
+    @Test func tagKeywordWithoutSpaces() {
+        #expect(EhTagDatabase.rebuildKeyword("artist:aaa") == "a:aaa$")
+        #expect(EhTagDatabase.rebuildKeyword("group:circle") == "g:circle$")
+    }
+
+    /// 重建后的关键词必须进入 f_search，且引号被保留（保证整体是一个词、不被空格拆开）
+    @Test func rebuiltTagKeywordEntersSearchParam() {
+        var builder = ListUrlBuilder()
+        builder.mode = .normal
+        builder.keyword = EhTagDatabase.rebuildKeyword("artist:aaa bbb")
+        let url = builder.build(site: .eHentai)
+
+        #expect(url.contains("f_search="))
+        // 引号无论编码成 %22 还是原样保留，都必须存在
+        #expect(url.contains("%22") || url.contains("\""))
     }
 
     // MARK: - 搜索词换行过滤

@@ -177,7 +177,10 @@ struct GalleryListView: View {
             viewModel.favSearchKeyword = favSearchKeyword
             viewModel.loadSearchHistory()
             if case .tag(let keyword) = mode, viewModel.searchText.isEmpty {
-                viewModel.searchText = keyword
+                // 点击标签 → 用 Android 同款语法重建关键词：`artist:foo bar` → `a:"foo bar$"`。
+                // 直接把 `artist:foo bar` 当搜索词的话，空格会被 E-Hentai 当成词分隔符，
+                // 拆成 `artist:foo` 和 `bar` 两个词（搜不到目标标签）。
+                viewModel.searchText = EhTagDatabase.rebuildKeyword(keyword)
             }
             // 注意: 上传者模式不预填搜索框 —— effectiveMode 会把非空搜索框降级为关键词搜索，
             // 那样就丢失了 /uploader/<name> 语义 (关键词搜不到该上传者的画廊)

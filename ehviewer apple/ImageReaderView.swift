@@ -182,6 +182,10 @@ struct ImageReaderView: View {
         #endif
         .onAppear(perform: setupReader)
         .onDisappear(perform: cleanupReader)
+        // 翻页时把新进入预加载窗口的页补进翻译队列（连续翻译模式下）
+        .onChange(of: vm.currentPage) { _, page in
+            translate.onVisiblePageChanged(gid: vm.gid, currentPage: page, preloaded: vm.cachedImages)
+        }
         // Apple 端上翻译：configuration 非 nil 时由系统提供 session 执行
         .translationTask(translate.appleBridge.configuration) { session in
             await translate.appleBridge.run(session: session)
@@ -410,6 +414,7 @@ struct ImageReaderView: View {
         timeTimer?.invalidate()
         autoPageTask?.cancel()
         pageChangeTask?.cancel()
+        translate.clear(gid: vm.gid)
         saveReadingProgress()
     }
 
@@ -1324,26 +1329,14 @@ struct ImageReaderView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
 
-            // 漫画翻译
+            // 漫画翻译：点一下开始连续翻译，再点一下显示原文
             if MangaTranslationSettings.shared.enabled {
-                Menu {
-                    Button {
-                        startTranslateCurrentPage()
-                    } label: {
-                        Label("翻译本页", systemImage: "translate")
-                    }
-                    .disabled(translate.stage.isBusy || vm.cachedImages[vm.currentPage] == nil)
-                    if translate.hasTranslation(gid: vm.gid, page: vm.currentPage) {
-                        Button {
-                            translate.toggleVisible()
-                        } label: {
-                            Label(translate.visible ? "显示原文" : "显示译文", systemImage: "rectangle.on.rectangle")
-                        }
-                    }
+                Button {
+                    toggleTranslate()
                 } label: {
                     Image(systemName: "translate")
                         .font(.title3)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(translate.autoTranslate ? Color.accentColor : .white)
                         .padding(10)
                         .background(.ultraThinMaterial, in: Circle())
                 }
@@ -1362,31 +1355,18 @@ struct ImageReaderView: View {
         .padding(.top, 50)
     }
 
-    /// 翻译当前页
-    private func startTranslateCurrentPage() {
+    /// 翻译按钮：点一下开启连续翻译（当前页 + 预加载页并行），再点一下显示原文
+    private func toggleTranslate() {
         guard MangaTranslationSettings.shared.enabled else { return }
-        guard let image = vm.cachedImages[vm.currentPage] else { return }
-        translate.translatePage(gid: vm.gid, page: vm.currentPage, image: image)
+        translate.toggleAutoTranslate(gid: vm.gid, currentPage: vm.currentPage, preloaded: vm.cachedImages)
     }
 
     /// 翻译进度 / 失败提示浮层
     @ViewBuilder
     private var translationStatusOverlay: some View {
-        switch translate.stage {
-        case .recognizing, .translating, .rendering:
-            VStack(spacing: 8) {
-                ProgressView().tint(.white)
-                Text(translate.stage.label)
-                    .font(.caption)
-                    .foregroundStyle(.white)
-            }
-            .padding(14)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .padding(.top, 120)
-            .frame(maxHeight: .infinity, alignment: .top)
-        case .failed(let message):
+        if let message = translate.failureMessage {
             Button {
-                translate.acknowledge()
+                translate.dismissFailure()
             } label: {
                 Text(message)
                     .font(.caption)
@@ -1399,8 +1379,17 @@ struct ImageReaderView: View {
             .padding(.horizontal, 40)
             .padding(.top, 120)
             .frame(maxHeight: .infinity, alignment: .top)
-        default:
-            EmptyView()
+        } else if translate.isBusy {
+            VStack(spacing: 8) {
+                ProgressView().tint(.white)
+                Text("翻译中… 剩余 \(translate.pendingCount) 页")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+            }
+            .padding(14)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.top, 120)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 
