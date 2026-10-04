@@ -12,6 +12,9 @@ import EhModels
 import EhSpider
 import EhSettings
 import EhDatabase
+#if canImport(Translation)
+import Translation
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
