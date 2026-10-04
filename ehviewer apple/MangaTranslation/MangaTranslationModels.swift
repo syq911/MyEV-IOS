@@ -19,12 +19,15 @@ struct MangaTextLine: Identifiable, Sendable, Equatable {
     var boundingBox: CGRect
     /// 是否竖排（日漫常见）
     var isVertical: Bool
+    /// Vision 置信度（0~1，用于多策略合并时择优）
+    var confidence: Float
 
-    init(id: UUID = UUID(), text: String, boundingBox: CGRect, isVertical: Bool) {
+    init(id: UUID = UUID(), text: String, boundingBox: CGRect, isVertical: Bool, confidence: Float = 1) {
         self.id = id
         self.text = text
         self.boundingBox = boundingBox
         self.isVertical = isVertical
+        self.confidence = confidence
     }
 }
 
