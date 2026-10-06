@@ -84,7 +84,7 @@ struct DownloadOrderingTests {
     }
 
     /// 关键回归（bug #1）：拖动改变显示顺序后，下载顺序（谁先下载）不变。
-    @Test func reorderingDisplayDoesNotChangeDownloadOrder() {
+    @Test func reorderingDisplayDoesNotChangeDownloadOrder() throws {
         var tasks = [
             Self.makeTask(gid: 1, added: 100),
             Self.makeTask(gid: 2, added: 200),
@@ -98,7 +98,7 @@ struct DownloadOrderingTests {
             fromOffsets: IndexSet(integer: 2), toOffset: 0)
 
         #expect(tasks.map { $0.gallery.gid } == [3, 1, 2])
-        let after = DownloadOrdering.nextWaitingIndex(in: tasks)
+        let after = try #require(DownloadOrdering.nextWaitingIndex(in: tasks))
         #expect(before == 0)
         #expect(after == 1)                       // gid 1 现在排在数组中间
         #expect(tasks[after].gallery.gid == 1)    // 但它仍应最先下载（最早加入）
