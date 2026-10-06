@@ -107,7 +107,8 @@ public actor DownloadManager {
                     posted: record.posted, uploader: record.uploader,
                     rating: record.rating, pages: record.pages
                 )
-                return DownloadTask(gallery: gallery, label: record.label, state: record.state)
+                return DownloadTask(gallery: gallery, label: record.label, state: record.state,
+                                    addedDate: record.date, sortOrder: record.sortOrder)
             }
             // 扫描磁盘已下载的图片文件，恢复中断下载的进度
             for i in tasks.indices {
@@ -148,7 +149,11 @@ public actor DownloadManager {
             return
         }
 
-        let task = DownloadTask(gallery: gallery, label: label)
+        // 新任务追加到列表末尾（加入顺序 = 展示顺序），下载顺序由 addedDate 决定
+        let nextSortOrder = (downloadQueue.map(\.sortOrder).max() ?? -1) + 1
+        let addedDate = Date()
+        let task = DownloadTask(gallery: gallery, label: label,
+                                addedDate: addedDate, sortOrder: nextSortOrder)
         downloadQueue.append(task)
 
         // 持久化到数据库
@@ -158,7 +163,8 @@ public actor DownloadManager {
             thumb: gallery.thumb, category: gallery.category.rawValue,
             posted: gallery.posted, uploader: gallery.uploader,
             rating: gallery.rating, simpleLanguage: gallery.simpleLanguage,
-            pages: gallery.pages, state: Self.stateWait, date: Date()
+            pages: gallery.pages, state: Self.stateWait,
+            sortOrder: nextSortOrder, date: addedDate
         )
         try? EhDatabase.shared.insertDownload(record)
 
@@ -289,6 +295,27 @@ public actor DownloadManager {
         downloadQueue
     }
 
+    /// 手动拖动下载列表重新排序（**只改显示顺序，不影响下载顺序**）。
+    ///
+    /// - Parameters:
+    ///   - visibleGids: 当前列表实际展示的 gid 顺序（可能是按标签/状态/搜索过滤后的子集）。
+    ///   - fromOffsets / toOffset: SwiftUI `onMove` 提供的源位置与目标位置。
+    public func moveTasks(visibleGids: [Int64], fromOffsets: IndexSet, toOffset: Int) {
+        downloadQueue = DownloadOrdering.applyingMove(
+            to: downloadQueue, visibleGids: visibleGids,
+            fromOffsets: fromOffsets, toOffset: toOffset
+        )
+        persistDisplayOrder()
+    }
+
+    /// 把当前数组下标写回 `sortOrder` 并持久化（仅供展示顺序使用）
+    private func persistDisplayOrder() {
+        for index in downloadQueue.indices {
+            downloadQueue[index].sortOrder = index
+        }
+        try? EhDatabase.shared.setDownloadSortOrders(downloadQueue.map { $0.gallery.gid })
+    }
+
     /// 获取任务状态
     public func getTaskState(gid: Int64) -> Int {
         if activeTask?.gallery.gid == gid {
@@ -404,8 +431,9 @@ public actor DownloadManager {
     private func processQueue() {
         guard activeTask == nil else { return }
 
-        // 找到下一个等待中的任务
-        guard let nextIndex = downloadQueue.firstIndex(where: { $0.state == Self.stateWait }) else {
+        // 找到下一个等待中的任务 —— 按「加入时间」取最早的一个（先加入先下载）。
+        // ★ 不能用数组下标：数组是展示顺序，会被用户拖动改变；下载顺序永远按加入时间。
+        guard let nextIndex = DownloadOrdering.nextWaitingIndex(in: downloadQueue) else {
             isRunning = false
             runningGid = nil
             return
@@ -709,7 +737,10 @@ public actor DownloadManager {
         }
 
         // ⚠️ stateNone 而不是 stateWait: 这是"顺手存的"，不应该自己启动整本下载
-        var task = DownloadTask(gallery: gallery, label: nil, state: Self.stateNone)
+        let nextSortOrder = (downloadQueue.map(\.sortOrder).max() ?? -1) + 1
+        let addedDate = Date()
+        var task = DownloadTask(gallery: gallery, label: nil, state: Self.stateNone,
+                                addedDate: addedDate, sortOrder: nextSortOrder)
         task.downloadedPages = SpiderInfoFile.getDownloadedPages(
             in: directory, totalPages: max(gallery.pages, 1)
         ).count
@@ -721,7 +752,8 @@ public actor DownloadManager {
             thumb: gallery.thumb, category: gallery.category.rawValue,
             posted: gallery.posted, uploader: gallery.uploader,
             rating: gallery.rating, simpleLanguage: gallery.simpleLanguage,
-            pages: gallery.pages, state: Self.stateNone, date: Date()
+            pages: gallery.pages, state: Self.stateNone,
+            sortOrder: nextSortOrder, date: addedDate
         )
         try? EhDatabase.shared.insertDownload(record)
     }
@@ -756,13 +788,20 @@ public struct DownloadTask: Sendable {
     /// 下载速度 (字节/秒)
     public var speed: Int64
     public var spider: SpiderQueen?
+    /// 加入下载的时间 —— 决定下载顺序（先加入先下载）。
+    public var addedDate: Date
+    /// 下载列表的显示顺序 —— 仅用于列表展示（用户可拖动改变），不参与下载调度。
+    public var sortOrder: Int
 
-    public init(gallery: GalleryInfo, label: String? = nil, state: Int = DownloadManager.stateWait) {
+    public init(gallery: GalleryInfo, label: String? = nil, state: Int = DownloadManager.stateWait,
+                addedDate: Date = Date(), sortOrder: Int = 0) {
         self.gallery = gallery
         self.label = label
         self.state = state
         self.downloadedPages = 0
         self.speed = 0
+        self.addedDate = addedDate
+        self.sortOrder = sortOrder
     }
 }
 

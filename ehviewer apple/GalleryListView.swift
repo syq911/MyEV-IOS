@@ -39,6 +39,8 @@ struct GalleryListView: View {
     @State private var viewModel = GalleryListViewModel()
     @State private var showQuickSearch = false
     @State private var showTagSelector = false
+    /// 热门页标题菜单 →「进入排行榜」（以 Sheet 呈现已有的 TopListView）
+    @State private var showTopList = false
     @State private var advancedSearch = AdvancedSearchState.load()
     @State private var selectedQuickSearch: QuickSearchRecord?
     @State private var selectedGallery: GalleryInfo?
@@ -138,7 +140,7 @@ struct GalleryListView: View {
             NavigationSplitView {
                 NavigationStack(path: $sidebarPath) {
                     sidebarContent
-                        .navigationTitle(navigationTitle)
+                        .navigationTitle(displayTitle)
                         .navigationDestination(for: TagSearchDestination.self) { dest in
                             // 标签点击推入的画廊列表 (对齐 Android: onTagClick → 叠加新列表)
                             GalleryListView(mode: .tag(keyword: dest.tag), selection: $selectedGallery)
@@ -208,6 +210,17 @@ struct GalleryListView: View {
         .onChange(of: advancedSearch.persistSignature) { _, _ in
             advancedSearch.save()
         }
+        // 热门页标题菜单 →「进入排行榜」：以 Sheet 呈现已有排行榜页
+        .sheet(isPresented: $showTopList) {
+            NavigationStack {
+                TopListView(isPushed: true)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { showTopList = false }
+                        }
+                    }
+            }
+        }
     }
 
     // iPhone 布局
@@ -239,7 +252,7 @@ struct GalleryListView: View {
             .navigationDestination(for: UploaderSearchDestination.self) { dest in
                 GalleryListView(mode: .uploader(keyword: dest.uploader), isPushed: true)
             }
-            .navigationTitle(navigationTitle)
+            .navigationTitle(displayTitle)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -311,7 +324,7 @@ struct GalleryListView: View {
                 }
             }
         }
-        .navigationTitle(navigationTitle)
+        .navigationTitle(displayTitle)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -381,6 +394,26 @@ struct GalleryListView: View {
         case .tag: return "标签搜索"  // 对齐 Android: 标签关键字显示在搜索框而非标题
         case .uploader(let kw): return "上传者: \(kw)"
         case .favorites: return "收藏"
+        }
+    }
+
+    /// 展示用标题：在「浏览列表」(首页/热门/订阅) 里一旦搜索框有内容，
+    /// 就说明列表已切换成搜索结果，标题显示「搜索」提示用户当前状态
+    /// （否则会像 bug 描述那样一直停留在「热门」，让人以为回不去）。
+    private var displayTitle: String {
+        if !viewModel.searchText.isEmpty, searchReplacesListing {
+            return "搜索"
+        }
+        return navigationTitle
+    }
+
+    /// 搜索框内容是否会把当前列表替换成搜索结果（收藏夹内搜索仍保留「收藏」标题）
+    private var searchReplacesListing: Bool {
+        switch mode {
+        case .home, .popular, .subscription:
+            return true
+        default:
+            return false
         }
     }
 
@@ -457,7 +490,7 @@ struct GalleryListView: View {
     // 嵌入模式内容（无导航包装器，用于三栏布局的 content 列）
     private var embeddedContent: some View {
         sidebarContent
-            .navigationTitle(navigationTitle)
+            .navigationTitle(displayTitle)
             .task {
                 if viewModel.galleries.isEmpty {
                     viewModel.loadGalleries(mode: mode)
@@ -633,6 +666,31 @@ struct GalleryListView: View {
 
     @ToolbarContentBuilder
     private var galleryToolbar: some ToolbarContent {
+        // 热门页标题变成可点击菜单：搜索后标题显示「搜索」，点它可回到热门 / 去排行榜。
+        // 复用已有的热门页 (mode == .popular) 与排行榜页 (TopListView)，不新造页面。
+        if case .popular = mode {
+            ToolbarItem(placement: .principal) {
+                Menu {
+                    Button {
+                        enterPopularList()
+                    } label: {
+                        Label("进入热门", systemImage: "flame")
+                    }
+                    Button {
+                        enterTopList()
+                    } label: {
+                        Label("进入排行榜", systemImage: "chart.bar")
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(displayTitle)
+                            .font(.headline)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                    }
+                }
+            }
+        }
         // 其余按钮 (对齐 Android FAB secondaryButtons)
         ToolbarItem(placement: .automatic) {
             HStack(spacing: 4) {
@@ -650,6 +708,21 @@ struct GalleryListView: View {
                 .disabled(viewModel.galleries.isEmpty)
             }
         }
+    }
+
+    // MARK: - 热门页标题菜单动作
+
+    /// 回到热门列表：清空搜索框并重新加载热门
+    private func enterPopularList() {
+        isSearchFocused = false
+        viewModel.searchText = ""
+        viewModel.refresh(mode: .popular)
+    }
+
+    /// 进入排行榜：复用已有排行榜页 (TopListView)，以 Sheet 呈现
+    private func enterTopList() {
+        isSearchFocused = false
+        showTopList = true
     }
 
     // MARK: - 搜索面板浮层 (分类/筛选 chips + 搜索历史/标签建议，对齐 Android SearchBarScreen)

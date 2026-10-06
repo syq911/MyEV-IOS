@@ -67,6 +67,10 @@ struct GalleryDetailView: View {
     @State private var showArchive = false
     @State private var showTorrents = false
     @State private var showCellularWarning = false
+    /// 下载中/等待中 → 点击下载按钮：确认取消任务
+    @State private var showDownloadCancelConfirm = false
+    /// 已下载 → 点击下载按钮：确认删除任务
+    @State private var showDownloadDeleteConfirm = false
 
     /// 标签点击导航动作 — 在 Split/三栏布局中将标签列表推入左侧栏
     @Environment(\.tagNavigationAction) private var tagNavigationAction
@@ -201,6 +205,32 @@ struct GalleryDetailView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("这本共 \(vm.detail?.info.pages ?? gallery.pages) 页，下载会消耗蜂窝数据。可以在设置里关掉这个提醒。")
+        }
+        // 下载中/等待中 → 确认取消任务（紧凑底部弹窗，仅用于防误触）
+        .confirmationDialog(
+            "取消下载任务？",
+            isPresented: $showDownloadCancelConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("取消任务", role: .destructive) {
+                Task { await vm.deleteDownload(gid: gallery.gid) }
+            }
+            Button("继续下载", role: .cancel) {}
+        } message: {
+            Text("将从设备移除该任务，并删除已下载的内容。")
+        }
+        // 已下载 → 确认删除任务
+        .confirmationDialog(
+            "删除下载？",
+            isPresented: $showDownloadDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("删除任务和文件", role: .destructive) {
+                Task { await vm.deleteDownload(gid: gallery.gid) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将从设备移除该画廊和已下载的内容。")
         }
         .sheet(isPresented: $showArchive) {
             if let archiveUrl = vm.detail?.archiveUrl, !archiveUrl.isEmpty {
@@ -410,16 +440,15 @@ struct GalleryDetailView: View {
             Divider().frame(height: 32)
             actionButton(icon: vm.downloadIcon,
                          title: vm.downloadTitle) {
-                // Fix F1-4: 已下载状态 → 打开阅读器，不是重新下载
                 if vm.downloadState == DownloadManager.stateFinish {
+                    // 已下载 → 询问是否删除（阅读请用左侧「阅读」按钮）
                     Haptics.tap()
-                    vm.readerLaunchItem = ReaderLaunchItem(
-                        gid: gallery.gid,
-                        token: gallery.token,
-                        pages: vm.detail?.info.pages ?? gallery.pages,
-                        previewSet: vm.detail?.previewSet,
-                        initialPage: nil
-                    )
+                    showDownloadDeleteConfirm = true
+                } else if vm.downloadState == DownloadManager.stateDownload
+                            || vm.downloadState == DownloadManager.stateWait {
+                    // 下载中/等待中 → 询问是否取消任务
+                    Haptics.tap()
+                    showDownloadCancelConfirm = true
                 } else if GalleryActionService.shared.shouldWarnAboutCellular {
                     // 移动网络下先问一句，整本下载很容易吃掉几百 MB
                     showCellularWarning = true
@@ -1043,6 +1072,15 @@ class GalleryDetailViewModel {
         self.downloadState = state
         // Fix F3-4: 开始下载后启动轮询
         startDownloadPollingIfNeeded(gid: gallery.gid)
+    }
+
+    /// 取消/删除下载：移除任务并删除已下载文件，防止残留占用空间
+    func deleteDownload(gid: Int64) async {
+        downloadPollingTask?.cancel()
+        downloadPollingTask = nil
+        await DownloadManager.shared.deleteDownload(gid: gid, deleteFiles: true)
+        // 任务已被移除 → 状态回到「未下载」
+        downloadState = await DownloadManager.shared.getTaskState(gid: gid)
     }
 
     /// Fix F3-4: 当下载状态为进行中/等待时，每 2 秒轮询状态更新

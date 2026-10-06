@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Foundation
 import EhModels
 import EhDownload
 import EhDatabase
@@ -41,6 +42,9 @@ struct DownloadsView: View {
     @State private var selectedGids: Set<Int64> = []
     @State private var showBatchDeleteConfirm = false
     @State private var showMoveLabelSheet = false
+
+    // MARK: - 排序模式 (长按拖动改变列表显示顺序，不影响下载顺序)
+    @State private var isReorderMode = false
 
     // MARK: - 单项删除确认 (Fix: 从 Row 移至父视图，避免 Timer 刷新销毁 @State)
     @State private var deletingTaskGid: Int64? = nil
@@ -108,8 +112,27 @@ struct DownloadsView: View {
                 ToolbarItem(placement: .automatic) {
                     mainToolbarMenu
                 }
+                // 排序模式开关 —— 仅在多于 1 项且非选择模式时出现
+                if !isSelectMode && vm.tasks.count > 1 {
+                    ToolbarItem(placement: .automatic) {
+                        Button {
+                            withAnimation {
+                                if isReorderMode {
+                                    isReorderMode = false
+                                } else {
+                                    // 排序与批量选择互斥
+                                    exitSelectMode()
+                                    isReorderMode = true
+                                }
+                            }
+                        } label: {
+                            Image(systemName: isReorderMode ? "checkmark.circle.fill" : "arrow.up.arrow.down")
+                        }
+                        .accessibilityLabel(isReorderMode ? "完成排序" : "排序")
+                    }
+                }
             }
-            // 点右侧文字信息 → 画廊详情页 (对齐 Android: 下载列表点条目进详情)
+            // 点缩略图 → 画廊详情页；点右侧文字信息 → 阅读器
             .navigationDestination(for: GalleryInfo.self) { gallery in
                 GalleryDetailView(gallery: gallery)
                     .id(gallery.gid)
@@ -652,6 +675,7 @@ struct DownloadsView: View {
                 Divider()
 
                 Button {
+                    isReorderMode = false
                     isSelectMode = true
                     selectedGids.removeAll()
                 } label: {
@@ -715,12 +739,13 @@ struct DownloadsView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { toggleSelection(gid: task.gallery.gid) }
                 } else {
-                    // 点预览图 → 阅读器；点右侧文字信息 → 画廊详情页
+                    // 点预览图 → 画廊详情页；点右侧文字信息 → 阅读器
                     DownloadTaskRow(
                         task: task,
                         readingPage: readingProgress[task.gallery.gid],
                         storageSize: gallerySizes[task.gallery.gid],
                         isSelectionMode: false,
+                        isReorderMode: isReorderMode,
                         onOpenReader: { readerGallery = task.gallery },
                         onOpenDetail: { navPath.append(task.gallery) },
                         onPause: { vm.pauseTask(gid: task.gallery.gid) },
@@ -733,6 +758,10 @@ struct DownloadsView: View {
                     )
                 }
             }
+            // 排序模式：长按行拖动改变显示顺序（下载顺序不受影响）
+            .onMove(perform: isReorderMode ? { (source: IndexSet, destination: Int) in
+                reorderTasks(from: source, to: destination)
+            } : nil)
         }
         .listStyle(.plain)
         .overlay {
@@ -827,6 +856,20 @@ struct DownloadsView: View {
     private func exitSelectMode() {
         isSelectMode = false
         selectedGids.removeAll()
+    }
+
+    /// 长按拖动下载列表后应用新的显示顺序。
+    /// 只改展示顺序，下载顺序仍按「加入时间」由 DownloadManager 决定。
+    private func reorderTasks(from source: IndexSet, to destination: Int) {
+        let visibleGids = filteredTasks.map { $0.gallery.gid }
+        // 乐观更新本地顺序，界面立即响应（随后以 DownloadManager 的结果为准）
+        vm.applyLocalMove(visibleGids: visibleGids, fromOffsets: source, toOffset: destination)
+        Task {
+            await DownloadManager.shared.moveTasks(
+                visibleGids: visibleGids, fromOffsets: source, toOffset: destination
+            )
+            await vm.loadTasks()
+        }
     }
 
     // MARK: - 标签管理
@@ -937,24 +980,49 @@ private struct RowTapZone: ViewModifier {
     }
 }
 
+/// 按需挂载长按菜单 —— 排序模式下完全移除，避免长按手势与列表拖动排序冲突
+private struct RowContextMenu<MenuContent: View>: ViewModifier {
+    let enabled: Bool
+    let menu: () -> MenuContent
+
+    init(enabled: Bool, @ViewBuilder menu: @escaping () -> MenuContent) {
+        self.enabled = enabled
+        self.menu = menu
+    }
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.contextMenu { menu() }
+        } else {
+            content
+        }
+    }
+}
+
 struct DownloadTaskRow: View {
     let task: DownloadTask
     let readingPage: Int?      // 阅读进度 (当前页索引)
     let storageSize: Int64?    // 画廊占用空间 (字节)
     /// 选择模式：整行点击由父视图处理，子区域不再挂手势
     var isSelectionMode: Bool = false
-    /// 点预览图 → 阅读器
+    /// 排序模式：关闭子区域手势与长按菜单，把长按让给列表拖动排序
+    var isReorderMode: Bool = false
+    /// 点预览图 → 画廊详情页
     var onOpenReader: () -> Void = {}
-    /// 点右侧文字信息 → 画廊详情页
+    /// 点右侧文字信息 → 阅读器
     var onOpenDetail: () -> Void = {}
     let onPause: () -> Void
     let onResume: () -> Void
     let onRequestDelete: () -> Void   // 请求删除 (由父视图处理确认)
     let onShare: () -> Void           // 打包为 zip 并分享 (issue #2)
 
+    /// 行内子区域是否响应点击（选择模式 / 排序模式下关闭）
+    private var rowInteractionEnabled: Bool { !isSelectionMode && !isReorderMode }
+
     var body: some View {
         HStack(spacing: 12) {
-            // 封面 → 点击进阅读器
+            // 封面 → 点击进画廊详情页
             CachedAsyncImage(url: URL(string: task.gallery.thumb ?? "")) { img in
                 img.resizable().aspectRatio(contentMode: .fill)
             } placeholder: {
@@ -962,7 +1030,7 @@ struct DownloadTaskRow: View {
             }
             .frame(width: 52, height: 72)
             .clipShape(RoundedRectangle(cornerRadius: 4))
-            .modifier(RowTapZone(enabled: !isSelectionMode, action: onOpenReader))
+            .modifier(RowTapZone(enabled: rowInteractionEnabled, action: onOpenDetail))
 
             VStack(alignment: .leading, spacing: 5) {
                 // 标题
@@ -1030,10 +1098,10 @@ struct DownloadTaskRow: View {
                     }
                 }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .modifier(RowTapZone(enabled: !isSelectionMode, action: onOpenDetail))
+            .modifier(RowTapZone(enabled: rowInteractionEnabled, action: onOpenReader))
         }
         .contentShape(Rectangle())
-        .contextMenu {
+        .modifier(RowContextMenu(enabled: !isReorderMode) {
             // 暂停/恢复
             if task.state == DownloadManager.stateDownload || task.state == DownloadManager.stateWait {
                 Button {
@@ -1080,7 +1148,7 @@ struct DownloadTaskRow: View {
                 }
             }
             #endif
-        }
+        })
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 onRequestDelete()
@@ -1215,6 +1283,14 @@ class DownloadsViewModel {
             await DownloadManager.shared.deleteDownload(gid: gid, deleteFiles: withFiles)
             await loadTasks()
         }
+    }
+
+    /// 排序模式下乐观更新本地显示顺序（仅展示；随后由 DownloadManager 持久化结果覆盖）
+    func applyLocalMove(visibleGids: [Int64], fromOffsets: IndexSet, toOffset: Int) {
+        tasks = DownloadOrdering.applyingMove(
+            to: tasks, visibleGids: visibleGids,
+            fromOffsets: fromOffsets, toOffset: toOffset
+        )
     }
 
     func pauseAll() {

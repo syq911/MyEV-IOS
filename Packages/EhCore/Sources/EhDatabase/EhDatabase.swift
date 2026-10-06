@@ -47,6 +47,11 @@ public final class EhDatabase: Sendable {
     /// 标记是否处于降级模式（内存数据库，重启后数据丢失）
     public let isDegraded: Bool
 
+    /// 仅供测试使用：创建一个隔离的内存数据库实例，避免污染真实的 eh.sqlite。
+    public static func makeInMemoryForTesting() throws -> EhDatabase {
+        try EhDatabase(inMemory: true)
+    }
+
     private let dbQueue: DatabaseQueue
 
     private init(inMemory: Bool = false) throws {
@@ -221,6 +226,15 @@ public final class EhDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v3") { db in
+            // 下载列表的「显示顺序」。仅用于下载界面的展示排序（用户长按拖动排序），
+            // 下载顺序永远按 `date`（加入时间，"先加入先下载"），本列不影响下载调度。
+            // 默认 0：老数据全部为 0，再由 date 兜底排序 = 加入顺序。
+            try db.alter(table: "download") { t in
+                t.add(column: "sortOrder", .integer).notNull().defaults(to: 0)
+            }
+        }
+
         return migrator
     }
 
@@ -234,7 +248,25 @@ public final class EhDatabase: Sendable {
 
     public func getAllDownloads() throws -> [DownloadRecord] {
         try dbQueue.read { db in
-            try DownloadRecord.order(Column("date").desc).fetchAll(db)
+            // 显示顺序优先（用户拖动的结果），其次按加入时间升序
+            // → 没有拖动过的老数据（sortOrder 全为 0）自然就是「先加入的在上」，
+            //   与下载顺序（按 date 先加入先下载）保持一致，重启后也不会变。
+            try DownloadRecord
+                .order(Column("sortOrder").asc, Column("date").asc)
+                .fetchAll(db)
+        }
+    }
+
+    /// 持久化下载列表的显示顺序（数组下标即新的 sortOrder）。
+    /// 只影响展示，不影响下载调度。
+    public func setDownloadSortOrders(_ gids: [Int64]) throws {
+        try dbQueue.write { db in
+            for (index, gid) in gids.enumerated() {
+                if var record = try DownloadRecord.fetchOne(db, key: gid) {
+                    record.sortOrder = index
+                    try record.update(db)
+                }
+            }
         }
     }
 
@@ -751,18 +783,21 @@ public struct DownloadRecord: Codable, FetchableRecord, PersistableRecord, Senda
     public var legacy: Int
     public var date: Date
     public var label: String?
+    /// 下载列表显示顺序（仅展示用，不影响下载调度）
+    public var sortOrder: Int = 0
 
     public init(gid: Int64, token: String, title: String, titleJpn: String? = nil,
                 thumb: String? = nil, category: Int = 0, posted: String? = nil,
                 uploader: String? = nil, rating: Float = 0, simpleLanguage: String? = nil,
-                pages: Int = 0, state: Int = 0, label: String? = nil, date: Date = .init()) {
+                pages: Int = 0, state: Int = 0, label: String? = nil,
+                sortOrder: Int = 0, date: Date = .init()) {
         self.gid = gid; self.token = token; self.title = title
         self.titleJpn = titleJpn; self.thumb = thumb
         self.category = category; self.posted = posted
         self.uploader = uploader; self.rating = rating
         self.simpleLanguage = simpleLanguage; self.pages = pages
         self.state = state; self.legacy = 0; self.date = date
-        self.label = label
+        self.label = label; self.sortOrder = sortOrder
     }
 }
 
