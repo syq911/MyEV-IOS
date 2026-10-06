@@ -21,7 +21,7 @@ final class AppleTranslationBridge {
     var configuration: TranslationSession.Configuration?
 
     @ObservationIgnored private var pendingTexts: [String] = []
-    @ObservationIgnored private var continuation: CheckedContinuation<[String], Error>?
+    @ObservationIgnored private var continuation: CheckedContinuation<[Int: String], Error>?
 
     /// 触发一次 Apple 端上翻译
     func translate(
