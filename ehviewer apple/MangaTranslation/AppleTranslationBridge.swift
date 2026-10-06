@@ -28,8 +28,8 @@ final class AppleTranslationBridge {
         _ texts: [String],
         source: MangaTranslationSource,
         target: MangaTranslationTarget
-    ) async throws -> [String] {
-        guard !texts.isEmpty else { return [] }
+    ) async throws -> [Int: String] {
+        guard !texts.isEmpty else { return [:] }
         guard continuation == nil else { throw MangaTranslationError.cancelled }
         return try await withCheckedThrowingContinuation { cont in
             self.pendingTexts = texts
@@ -48,11 +48,11 @@ final class AppleTranslationBridge {
         pendingTexts = []
         configuration = nil
         do {
-            var results: [String] = []
+            var results: [Int: String] = [:]
             results.reserveCapacity(texts.count)
-            for text in texts {
+            for (index, text) in texts.enumerated() {
                 let response = try await session.translate(text)
-                results.append(response.targetText)
+                results[index] = response.targetText
             }
             cont.resume(returning: results)
         } catch {

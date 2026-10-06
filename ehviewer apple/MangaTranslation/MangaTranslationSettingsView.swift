@@ -19,6 +19,13 @@ struct MangaTranslationSettingsView: View {
     @State private var model = MangaTranslationSettings.shared.deepSeekModel
     @State private var apiKey = MangaTranslationSettings.shared.deepSeekAPIKey
     @State private var lineDropFallback = MangaTranslationSettings.shared.usesLineDropFallback
+    @State private var cacheBytes: Int64 = 0
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        return f
+    }()
 
     var body: some View {
         Form {
@@ -130,10 +137,30 @@ struct MangaTranslationSettingsView: View {
                         .frame(width: 44, alignment: .trailing)
                 }
             }
+
+            Section {
+                HStack {
+                    Text("占用空间")
+                    Spacer()
+                    Text(cacheBytes > 0 ? Self.byteFormatter.string(fromByteCount: cacheBytes) : "无")
+                        .foregroundStyle(.secondary)
+                }
+                Button("清除译文缓存", role: .destructive) {
+                    MangaTranslationCache.shared.clearAll()
+                    cacheBytes = 0
+                }
+            } header: {
+                Text("译文缓存")
+            } footer: {
+                Text("翻译结果会缓存在本地：切到「显示原文」再切回来、或退出阅读器重新进入时直接复用，不会重复翻译。字号等排版设置的变化只重新排版，不重新翻译。")
+            }
         }
         .navigationTitle("漫画翻译")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .task {
+            cacheBytes = MangaTranslationCache.shared.totalBytes
+        }
     }
 }

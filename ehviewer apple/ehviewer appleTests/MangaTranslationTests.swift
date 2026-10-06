@@ -73,6 +73,114 @@ struct MangaTranslationTests {
         #expect(rect.height == 200)
     }
 
+    // MARK: 排版：盖字避让 / 字号下限 / 截断
+
+    /// 相邻文字框很近时，覆盖框会缩小外扩，避免盖住邻居
+    @Test func coverRectShrinksToAvoidNeighbors() {
+        let page = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let box = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let neighbor = CGRect(x: 202, y: 100, width: 100, height: 100)
+        let rect = MangaTypesetter.coverRect(box: box, neighbors: [neighbor], pageRect: page)
+        #expect(!rect.intersects(neighbor))
+        #expect(rect.contains(box))
+    }
+
+    /// 没有邻居时，覆盖框比原框略大（盖住原文笔画）
+    @Test func coverRectExpandsWhenNoNeighbors() {
+        let page = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let box = CGRect(x: 100, y: 100, width: 100, height: 100)
+        let rect = MangaTypesetter.coverRect(box: box, neighbors: [], pageRect: page)
+        #expect(rect.width > box.width)
+        #expect(rect.height > box.height)
+    }
+
+    /// 最小可读字号有下限，避免译文小到看不清
+    @Test func minReadableFontHasFloor() {
+        let big = MangaTypesetter.minReadableFont(
+            box: CGRect(x: 0, y: 0, width: 300, height: 300), pageShortSide: 1248)
+        #expect(big >= 10)
+        let tiny = MangaTypesetter.minReadableFont(
+            box: CGRect(x: 0, y: 0, width: 8, height: 8), pageShortSide: 1248)
+        #expect(tiny >= 10)
+    }
+
+    /// 选出的字号必须落在 [minFont, startFont] 内，且真的能放下
+    @Test func fitFontSizeStaysWithinBoundsAndFits() {
+        let box = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let text = "这是一段比较长的中文译文需要换行显示"
+        let font = MangaTypesetter.fitFontSize(text: text, box: box, startFont: 200, minFont: 24)
+        #expect(font >= 24)
+        #expect(font <= 200)
+        #expect(MangaTypesetter.fits(text: text, fontSize: font, box: box))
+    }
+
+    /// 短文本不该被截断
+    @Test func truncatedTextKeepsShortText() {
+        let text = "短"
+        let out = MangaTypesetter.truncatedText(text: text, fontSize: 30, maxWidth: 400, maxHeight: 300)
+        #expect(out == text)
+    }
+
+    /// 长文本在该字号放不下时必须截断并加省略号（宁少不溢出）
+    @Test func truncatedTextAddsEllipsisWhenTooLong() {
+        let long = String(repeating: "漫", count: 200)
+        let out = MangaTypesetter.truncatedText(text: long, fontSize: 60, maxWidth: 200, maxHeight: 120)
+        #expect(out.hasSuffix("…"))
+        #expect(out.count < long.count)
+    }
+
+    /// 竖排：长文本会按容量截断，字号不小于下限，列数不超过框宽
+    @Test func fitVerticalTruncatesAndRespectsBounds() {
+        let box = CGRect(x: 0, y: 0, width: 200, height: 300)
+        let long = String(repeating: "あ", count: 300)
+        let fit = MangaTypesetter.fitVertical(text: long, box: box, scale: 1.0, minFont: 40)
+        #expect(fit.fontSize >= 40)
+        #expect(fit.characters.last == "…")
+        #expect(CGFloat(fit.columns) * fit.fontSize <= box.width + 1)
+        #expect(fit.characters.count <= fit.columns * fit.charsPerColumn)
+    }
+
+    /// 竖排：短文本应原样保留
+    @Test func fitVerticalKeepsShortText() {
+        let box = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let fit = MangaTypesetter.fitVertical(text: "こんにちは", box: box, scale: 1.0, minFont: 20)
+        #expect(fit.characters == ["こ", "ん", "に", "ち", "は"])
+    }
+
+    // MARK: 译文缓存（落盘）
+
+    @Test func translationCacheRoundTrip() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manga-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let cache = MangaTranslationCache.makeForTesting(root: tmp)
+        let lines = [
+            MangaTranslatedLine(source: "こんにちは", translated: "你好",
+                                boundingBox: CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.1),
+                                isVertical: false),
+        ]
+        cache.save(gid: 42, page: 7, signature: "ja|zh-Hans|0|deepseek-chat", lines: lines)
+        cache.flush()
+
+        let loaded = cache.load(gid: 42, page: 7, signature: "ja|zh-Hans|0|deepseek-chat")
+        #expect(loaded?.count == 1)
+        #expect(loaded?.first?.translated == "你好")
+        #expect(abs((loaded?.first?.boundingBox.width ?? 0) - 0.3) < 1e-9)
+
+        // 翻译签名不同（例如换了目标语言）→ 不命中
+        #expect(cache.load(gid: 42, page: 7, signature: "ja|en|0|deepseek-chat") == nil)
+
+        // 清理后不再命中
+        cache.clear(gid: 42)
+        cache.flush()
+        #expect(cache.load(gid: 42, page: 7, signature: "ja|zh-Hans|0|deepseek-chat") == nil)
+    }
+
+    @Test func translationCacheSanitizesSignature() {
+        #expect(MangaTranslationCache.sanitize("ja|zh-Hans|0|deepseek-chat") == "ja_zh-Hans_0_deepseek-chat")
+    }
+
     // MARK: 合并去重（纯逻辑）
 
     @Test func mergeDeduplicatesOverlappingLines() {
@@ -98,19 +206,47 @@ struct MangaTranslationTests {
     // MARK: 译文 JSON 解析
 
     @Test func parseTranslationsPlain() throws {
-        let out = try DeepSeekTranslator.parseTranslations("[\"你好\",\"世界\"]", expected: 2)
+        let out = try DeepSeekTranslator.parseTranslations("[\"你好\",\"世界\"]")
         #expect(out == ["你好", "世界"])
     }
 
     @Test func parseTranslationsWithCodeFence() throws {
-        let out = try DeepSeekTranslator.parseTranslations("```json\n[\"a\",\"b\"]\n```", expected: 2)
+        let out = try DeepSeekTranslator.parseTranslations("```json\n[\"a\",\"b\"]\n```")
         #expect(out == ["a", "b"])
     }
 
-    @Test func parseTranslationsCountMismatch() {
-        #expect(throws: MangaTranslationError.self) {
-            _ = try DeepSeekTranslator.parseTranslations("[\"a\"]", expected: 2)
-        }
+    /// 条数不匹配**不再抛错** —— 能解析出多少就返回多少（缺的交给上层降级）。
+    @Test func parseTranslationsToleratesCountMismatch() throws {
+        let out = try DeepSeekTranslator.parseTranslations("[\"a\"]")
+        #expect(out == ["a"])
+    }
+
+    // MARK: 译文 JSON 解析（带下标，容错对位）
+
+    @Test func parseIndexedTranslationsMapsByIndex() {
+        let map = DeepSeekTranslator.parseIndexedTranslations(
+            #"[{"i":0,"t":"甲"},{"i":2,"t":"丙"}]"#)
+        #expect(map?[0] == "甲")
+        #expect(map?[1] == nil)      // 缺失的条目就是不出现
+        #expect(map?[2] == "丙")
+    }
+
+    @Test func parseIndexedTranslationsWithCodeFence() {
+        let map = DeepSeekTranslator.parseIndexedTranslations(
+            "```json\n[{\"i\":1,\"t\":\"乙\"}]\n```")
+        #expect(map?[1] == "乙")
+    }
+
+    /// 兼容常见别名（index / translation）与键序不同的写法
+    @Test func parseIndexedTranslationsAcceptsAliases() {
+        let map = DeepSeekTranslator.parseIndexedTranslations(
+            #"[{"index":3,"translation":"丁"}]"#)
+        #expect(map?[3] == "丁")
+    }
+
+    @Test func parseIndexedTranslationsRejectsNonIndexed() {
+        // 纯字符串数组不是带下标格式 → 返回 nil，交给字符串数组回退路径
+        #expect(DeepSeekTranslator.parseIndexedTranslations("[\"a\",\"b\"]") == nil)
     }
 
     // MARK: 金标准：真实页图 OCR 必须匹配「快捷指令截图识字」的正确结果
