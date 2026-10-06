@@ -149,12 +149,14 @@ public actor DownloadManager {
             return
         }
 
-        // 新任务追加到列表末尾（加入顺序 = 展示顺序），下载顺序由 addedDate 决定
-        let nextSortOrder = (downloadQueue.map(\.sortOrder).max() ?? -1) + 1
+        // 新任务插入到列表最前面（新加入的显示在最上）；
+        // 下载顺序仍由 addedDate 决定（先加入先下载），与展示顺序互不影响。
+        let nextSortOrder = DownloadOrdering.insertionSortOrderForTop(
+            existing: downloadQueue.map(\.sortOrder))
         let addedDate = Date()
         let task = DownloadTask(gallery: gallery, label: label,
                                 addedDate: addedDate, sortOrder: nextSortOrder)
-        downloadQueue.append(task)
+        downloadQueue.insert(task, at: 0)
 
         // 持久化到数据库
         let record = DownloadRecord(
@@ -737,14 +739,16 @@ public actor DownloadManager {
         }
 
         // ⚠️ stateNone 而不是 stateWait: 这是"顺手存的"，不应该自己启动整本下载
-        let nextSortOrder = (downloadQueue.map(\.sortOrder).max() ?? -1) + 1
+        // 同样插入到列表最前面（新加入的显示在最上）
+        let nextSortOrder = DownloadOrdering.insertionSortOrderForTop(
+            existing: downloadQueue.map(\.sortOrder))
         let addedDate = Date()
         var task = DownloadTask(gallery: gallery, label: nil, state: Self.stateNone,
                                 addedDate: addedDate, sortOrder: nextSortOrder)
         task.downloadedPages = SpiderInfoFile.getDownloadedPages(
             in: directory, totalPages: max(gallery.pages, 1)
         ).count
-        downloadQueue.append(task)
+        downloadQueue.insert(task, at: 0)
 
         let record = DownloadRecord(
             gid: gallery.gid, token: gallery.token,

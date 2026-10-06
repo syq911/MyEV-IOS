@@ -5,8 +5,8 @@
 //  下载系统回归测试：
 //    1) 下载顺序：永远按「加入时间」先加入先下载（FIFO），与列表显示顺序无关。
 //    2) 显示顺序：用户长按拖动只改展示顺序，可持久化，绝不影响下载调度。
-//    3) 持久化：重启后 `getAllDownloads()` 仍按「加入顺序 / 用户拖动顺序」返回，
-//       不会像旧实现那样翻转成「最新在最上」。
+//    3) 持久化：**新加入的显示在最上面**（sortOrder 取当前最小 - 1）；
+//       重启后 `getAllDownloads()` 仍按「用户拖动顺序 / 新加入置顶」返回。
 //
 
 import Testing
@@ -83,6 +83,15 @@ struct DownloadOrderingTests {
         #expect(DownloadOrdering.nextWaitingIndex(in: tasks) == 0)
     }
 
+    // MARK: - 新增置顶：新加入的显示在最上面
+
+    /// 新加入任务的 sortOrder 取「当前最小 - 1」，从而排到列表最前；空列表为 0。
+    @Test func insertionSortOrderForTopPicksBelowMinimum() {
+        #expect(DownloadOrdering.insertionSortOrderForTop(existing: []) == 0)
+        #expect(DownloadOrdering.insertionSortOrderForTop(existing: [0, 1, 2]) == -1)
+        #expect(DownloadOrdering.insertionSortOrderForTop(existing: [-3, 5]) == -4)
+    }
+
     /// 关键回归（bug #1）：拖动改变显示顺序后，下载顺序（谁先下载）不变。
     @Test func reorderingDisplayDoesNotChangeDownloadOrder() throws {
         var tasks = [
@@ -145,8 +154,8 @@ struct DownloadOrderingTests {
 
     // MARK: - 持久化（内存数据库）
 
-    /// 未拖动过（sortOrder 全 0）时，按加入顺序返回 —— 重启后仍是「先加入的在上」。
-    @Test func downloadsPersistedInAddOrder() throws {
+    /// 未拖动过（sortOrder 全 0）时，按加入时间**倒序**返回 —— 即「新加入的显示在最上面」。
+    @Test func downloadsPersistedNewestFirst() throws {
         let db = try EhDatabase.makeInMemoryForTesting()
 
         try db.insertDownload(Self.makeRecord(gid: 1, date: 100))
@@ -154,7 +163,7 @@ struct DownloadOrderingTests {
         try db.insertDownload(Self.makeRecord(gid: 3, date: 300))
 
         let gids = try db.getAllDownloads().map { $0.gid }
-        #expect(gids == [1, 2, 3])
+        #expect(gids == [3, 2, 1])
     }
 
     /// 用户拖动后的显示顺序会被持久化并在读取时生效；同时 date（下载顺序）保持不变。
@@ -176,8 +185,8 @@ struct DownloadOrderingTests {
         #expect(byDate == [1, 2, 3])
     }
 
-    /// 新增下载默认排在最后：sortOrder 取「当前最大值 + 1」，date 也最新。
-    @Test func newlyAddedDownloadGoesLast() throws {
+    /// 新增下载默认排在**最上面**：sortOrder 取「当前最小值 - 1」。
+    @Test func newlyAddedDownloadGoesFirst() throws {
         let db = try EhDatabase.makeInMemoryForTesting()
 
         try db.insertDownload(Self.makeRecord(gid: 1, date: 100, sortOrder: 0))
@@ -186,11 +195,12 @@ struct DownloadOrderingTests {
         // 拖动后顺序变成 2,1
         try db.setDownloadSortOrders([2, 1])
 
-        // 新加入 gid 3：sortOrder = max(0,1) + 1 = 2
-        let nextSortOrder = try db.getAllDownloads().map { $0.sortOrder }.max().map { $0 + 1 } ?? 0
+        // 新加入 gid 3：sortOrder = min(0,1) - 1 = -1 → 排到最前
+        let nextSortOrder = DownloadOrdering.insertionSortOrderForTop(
+            existing: try db.getAllDownloads().map { $0.sortOrder })
         try db.insertDownload(Self.makeRecord(gid: 3, date: 300, sortOrder: nextSortOrder))
 
         let gids = try db.getAllDownloads().map { $0.gid }
-        #expect(gids == [2, 1, 3])
+        #expect(gids == [3, 2, 1])
     }
 }

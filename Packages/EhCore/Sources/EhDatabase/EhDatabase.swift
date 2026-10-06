@@ -248,11 +248,12 @@ public final class EhDatabase: Sendable {
 
     public func getAllDownloads() throws -> [DownloadRecord] {
         try dbQueue.read { db in
-            // 显示顺序优先（用户拖动的结果），其次按加入时间升序
-            // → 没有拖动过的老数据（sortOrder 全为 0）自然就是「先加入的在上」，
-            //   与下载顺序（按 date 先加入先下载）保持一致，重启后也不会变。
+            // 显示顺序优先（用户拖动的结果 / 新加入的置顶），同一位次再按加入时间**倒序**
+            // → 没有拖动过的老数据（sortOrder 全为 0）自然就是「后加入的在上」，
+            //   即新加入的显示在最上面。
+            // 下载顺序另由 date 升序决定（先加入先下载），与显示顺序互不影响。
             try DownloadRecord
-                .order(Column("sortOrder").asc, Column("date").asc)
+                .order(Column("sortOrder").asc, Column("date").desc)
                 .fetchAll(db)
         }
     }

@@ -29,6 +29,16 @@ public enum DownloadOrdering {
         return best
     }
 
+    /// 新加入任务要「**显示在列表最上面**」时应使用的 `sortOrder`：
+    /// 取当前最小 `sortOrder` 再减一，保证它排在所有既有条目之前，
+    /// 同时不改动其它条目的相对顺序（用户拖动过的结果因而得以保留）。
+    ///
+    /// 空列表时返回 0（第一个条目）。注意：这里只管**展示顺序**，
+    /// 下载顺序仍由 `addedDate` 决定（见 `nextWaitingIndex`）。
+    public static func insertionSortOrderForTop(existing: [Int]) -> Int {
+        (existing.min() ?? 1) - 1
+    }
+
     /// 把一个数组中的元素从 `fromOffsets` 移动到 `toOffset`（等价于 SwiftUI
     /// `onMove` / `MutableCollection.move(fromOffsets:toOffset:)` 的语义）。
     ///
