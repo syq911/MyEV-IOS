@@ -232,7 +232,10 @@ struct MainTabView: View {
         // 记住当前标签页，供下次启动恢复现场（进程被系统回收后重开不再回到启动页）
         .onChange(of: selectedTab) { _, newTab in
             UserDefaults.standard.set(newTab.rawValue, forKey: Self.lastSelectedTabKey)
+            Task { await LibraryStatusStore.shared.refresh() }
         }
+        // 启动时刷新「库状态」索引（各列表行的下载/收藏角标）
+        .task { await LibraryStatusStore.shared.refresh() }
         #endif
     }
 

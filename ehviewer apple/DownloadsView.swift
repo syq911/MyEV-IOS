@@ -1045,6 +1045,18 @@ struct DownloadTaskRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    // 收藏(本地) 与 语言
+                    if LibraryStatusStore.shared.isLocalFavorite(gid: task.gallery.gid) {
+                        Image(systemName: "heart.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                    if let lang = task.gallery.simpleLanguage, !lang.isEmpty {
+                        Text(lang)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Spacer()
 
                     // 占用空间
@@ -1055,37 +1067,26 @@ struct DownloadTaskRow: View {
                             .monospacedDigit()
                     }
 
-                    // 阅读进度 (已完成/暂停/失败 状态显示) — 与总页数去重
-                    if let page = readingPage, task.gallery.pages > 0,
-                       task.state != DownloadManager.stateDownload && task.state != DownloadManager.stateWait {
-                        HStack(spacing: 4) {
-                            ProgressView(value: Double(page + 1), total: Double(task.gallery.pages))
-                                .tint(.green)
-                                .frame(maxWidth: 60)
-                            Text("\(page + 1)/\(task.gallery.pages) 页")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                    } else if task.state != DownloadManager.stateDownload && task.state != DownloadManager.stateWait {
-                        // 无阅读进度时才单独显示总页数
-                        Text("\(task.gallery.pages) 页")
-                            .font(.caption)
+                    // 阅读进度 → 纯文字「已读 N/M」（进度条改为显示下载页数）
+                    if let page = readingPage, task.gallery.pages > 0 {
+                        Text("已读 \(page + 1)/\(task.gallery.pages)")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                 }
 
-                // 下载进度条 + 页数详情 (下载中/等待中)
-                if task.state == DownloadManager.stateDownload || task.state == DownloadManager.stateWait {
+                // 下载页数进度条（所有状态都显示；已完成 = 满）
+                if task.gallery.pages > 0 {
                     VStack(spacing: 2) {
                         ProgressView(value: downloadProgress)
-                            .tint(.accentColor)
+                            .tint(task.state == DownloadManager.stateFinish ? .green : .accentColor)
                         HStack {
-                            Text("\(task.downloadedPages)/\(task.gallery.pages)")
+                            Text("已下载 \(task.downloadedPages)/\(task.gallery.pages)")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            if task.speed > 0 {
+                            if task.state == DownloadManager.stateDownload, task.speed > 0 {
                                 Text(Self.formatSpeed(task.speed))
                                     .font(.caption2)
                                     .foregroundStyle(.blue)

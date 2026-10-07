@@ -105,7 +105,8 @@ public actor DownloadManager {
                     thumb: record.thumb,
                     category: EhCategory(rawValue: record.category),
                     posted: record.posted, uploader: record.uploader,
-                    rating: record.rating, pages: record.pages
+                    rating: record.rating, pages: record.pages,
+                    simpleLanguage: record.simpleLanguage
                 )
                 return DownloadTask(gallery: gallery, label: record.label, state: record.state,
                                     addedDate: record.date, sortOrder: record.sortOrder)

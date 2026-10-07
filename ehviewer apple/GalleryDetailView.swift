@@ -63,6 +63,10 @@ struct GalleryDetailView: View {
     @State private var showAllTags = false
     @State private var showRatingSheet = false
     @State private var showAllPreviews = false
+    /// 详情页内联预览的懒加载分页（首屏第 1 页，下滑继续补下一页）
+    @State private var previewVM = GalleryPreviewsViewModel()
+    /// 分页加载任务句柄 —— 退出详情页时取消，停止继续拉取预览图
+    @State private var previewLoadTask: Task<Void, Never>?
     @State private var showFavoritePicker = false
     @State private var showArchive = false
     @State private var showTorrents = false
@@ -71,6 +75,8 @@ struct GalleryDetailView: View {
     @State private var showDownloadCancelConfirm = false
     /// 已下载 → 点击下载按钮：确认删除任务
     @State private var showDownloadDeleteConfirm = false
+    /// 评论里的站内画廊链接 → 在 App 内打开目标画廊
+    @State private var linkGallery: GalleryInfo?
 
     /// 标签点击导航动作 — 在 Split/三栏布局中将标签列表推入左侧栏
     @Environment(\.tagNavigationAction) private var tagNavigationAction
@@ -157,8 +163,15 @@ struct GalleryDetailView: View {
         #endif
         .task(id: gallery.gid) {
             // 画廊 ID 变更时重置 VM 状态并重新加载 (修复 SwiftUI 视图复用 bug)
+            previewLoadTask?.cancel()
+            previewLoadTask = nil
+            previewVM.reset()
             vm.reset()
             await vm.loadDetail(gid: gallery.gid, token: gallery.token)
+            // 详情接口只带回第 0 页预览，塞进内联分页作为首屏
+            if let previewSet = vm.previewSet, !previewSet.isEmpty {
+                previewVM.initialize(initialPreviewSet: previewSet)
+            }
         }
         // Fix F3-2: 每次详情页出现时重新查询下载状态 (解决导航栈返回时状态不同步)
         .onAppear {
@@ -166,6 +179,11 @@ struct GalleryDetailView: View {
                 let dlState = await DownloadManager.shared.getTaskState(gid: gallery.gid)
                 vm.downloadState = dlState
             }
+        }
+        // 退出详情页：停止继续加载预览图，减少网络占用
+        .onDisappear {
+            previewLoadTask?.cancel()
+            previewLoadTask = nil
         }
         #if os(macOS)
         .onReceive(NotificationCenter.default.publisher(for: .downloadGallery)) { _ in
@@ -192,6 +210,18 @@ struct GalleryDetailView: View {
                 }
             )
             .presentationDetents([.height(200)])
+        }
+        // 评论里的站内画廊链接 → 在 App 内打开目标画廊详情
+        .sheet(item: $linkGallery) { g in
+            NavigationStack {
+                GalleryDetailView(gallery: g)
+                    .id(g.gid)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { linkGallery = nil }
+                        }
+                    }
+            }
         }
         .confirmationDialog(
             "当前是移动网络",
@@ -631,27 +661,18 @@ struct GalleryDetailView: View {
         let previewWidth: CGFloat = 100
         let previewHeight: CGFloat = 142  // 100 / 0.667 ≈ 150, 稍小一点
         let columns = [GridItem(.adaptive(minimum: previewWidth, maximum: previewWidth + 20), spacing: 8)]
-        
+
         return VStack(alignment: .leading, spacing: 8) {
             Divider()
             HStack {
                 Text("预览")
                     .font(.headline)
                 Spacer()
-                // 查看全部预览按钮
+                // 内联分页：首屏第 1 页，下滑自动补下一页（每次约 20 张），不再跳转「查看全部预览」
                 if vm.previewPages > 1 {
-                    NavigationLink {
-                        GalleryPreviewsView(
-                            gid: gallery.gid,
-                            token: gallery.token,
-                            totalPages: vm.previewPages,
-                            galleryPages: vm.detail?.info.pages ?? gallery.pages,
-                            initialPreviewSet: previewSet
-                        )
-                    } label: {
-                        Text("查看全部 (\(vm.detail?.info.pages ?? gallery.pages)张)")
-                            .font(.subheadline)
-                    }
+                    Text("共 \(vm.detail?.info.pages ?? gallery.pages) 张 · 下滑加载更多")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal)
@@ -659,84 +680,78 @@ struct GalleryDetailView: View {
 
             // 网格布局预览 (对齐 Android: AutoGridLayoutManager 网格布局)
             LazyVGrid(columns: columns, spacing: 12) {
-                switch previewSet {
-                case .large(let items):
-                    ForEach(items.sorted(by: { $0.position < $1.position }), id: \.position) { preview in
-                        VStack(spacing: 4) {
-                            CachedAsyncImage(url: URL(string: preview.imageUrl)) { img in
-                                img.resizable().aspectRatio(contentMode: .fill)
-                            } placeholder: {
-                                Color(.tertiarySystemFill)
-                                    .overlay { ProgressView() }
-                            }
-                            .frame(width: previewWidth, height: previewHeight)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .onTapGesture {
-                                // 对齐 Android: intent.putExtra(GalleryActivity.KEY_PAGE, index)
-                                vm.readerLaunchItem = ReaderLaunchItem(
-                                    gid: gallery.gid,
-                                    token: gallery.token,
-                                    pages: vm.detail?.info.pages ?? gallery.pages,
-                                    previewSet: vm.detail?.previewSet,
-                                    initialPage: preview.position
-                                )
-                            }
-                            
-                            // 页码标签 (对齐 Android: position + 1)
-                            Text("\(preview.position + 1)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                case .normal(let items):
-                    ForEach(items.sorted(by: { $0.position < $1.position }), id: \.position) { preview in
-                        VStack(spacing: 4) {
-                            SpritePreviewView(preview: preview)
-                                .frame(width: previewWidth, height: previewHeight)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                                .onTapGesture {
-                                    // 对齐 Android: intent.putExtra(GalleryActivity.KEY_PAGE, index)
-                                    vm.readerLaunchItem = ReaderLaunchItem(
-                                        gid: gallery.gid,
-                                        token: gallery.token,
-                                        pages: vm.detail?.info.pages ?? gallery.pages,
-                                        previewSet: vm.detail?.previewSet,
-                                        initialPage: preview.position
-                                    )
-                                }
-                            
-                            // 页码标签
-                            Text("\(preview.position + 1)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                ForEach(previewVM.allPreviews, id: \.position) { preview in
+                    previewCell(preview, width: previewWidth, height: previewHeight)
+                }
+
+                // 触底哨兵 —— 出现时拉取下一页预览（约 20 张）
+                if !previewVM.allPreviews.isEmpty, !previewVM.isLoadingMore {
+                    Color.clear
+                        .frame(height: 1)
+                        .onAppear { loadMorePreviews() }
                 }
             }
             .padding(.horizontal)
 
-            // ★ 底部额外的「查看全部」按钮 — 方便用户滚动到底部后直接点击
-            if vm.previewPages > 1 {
-                NavigationLink {
-                    GalleryPreviewsView(
-                        gid: gallery.gid,
-                        token: gallery.token,
-                        totalPages: vm.previewPages,
-                        galleryPages: vm.detail?.info.pages ?? gallery.pages,
-                        initialPreviewSet: previewSet
-                    )
-                } label: {
-                    Text("查看全部预览 (\(vm.detail?.info.pages ?? gallery.pages)张)")
-                        .font(.subheadline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color(.tertiarySystemFill))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .padding(.horizontal)
+            if previewVM.isLoadingMore {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
             }
         }
         .padding(.bottom, 12)
+        .onAppear {
+            if previewVM.allPreviews.isEmpty {
+                previewVM.initialize(initialPreviewSet: previewSet)
+            }
+        }
+    }
+
+    /// 加载下一页预览（退出详情页时由 previewLoadTask 取消，减少网络占用）
+    private func loadMorePreviews() {
+        previewLoadTask?.cancel()
+        previewLoadTask = Task {
+            await previewVM.loadNextPageIfNeeded(
+                gid: gallery.gid, token: gallery.token, totalPages: vm.previewPages
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func previewCell(_ preview: PreviewItem, width: CGFloat, height: CGFloat) -> some View {
+        VStack(spacing: 4) {
+            switch preview.type {
+            case .large(let imageUrl):
+                CachedAsyncImage(url: URL(string: imageUrl)) { img in
+                    img.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Color(.tertiarySystemFill)
+                        .overlay { ProgressView() }
+                }
+                .frame(width: width, height: height)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            case .normal(let normalPreview):
+                SpritePreviewView(preview: normalPreview)
+                    .frame(width: width, height: height)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+
+            // 页码标签 (对齐 Android: position + 1)
+            Text("\(preview.position + 1)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // 对齐 Android: intent.putExtra(GalleryActivity.KEY_PAGE, index)
+            vm.readerLaunchItem = ReaderLaunchItem(
+                gid: gallery.gid,
+                token: gallery.token,
+                pages: vm.detail?.info.pages ?? gallery.pages,
+                previewSet: vm.detail?.previewSet,
+                initialPage: preview.position
+            )
+        }
     }
 
     // MARK: - Comments (对齐 Android: 默认显示前2条评论，每条最多5行)
@@ -793,10 +808,9 @@ struct GalleryDetailView: View {
                                     .foregroundStyle(comment.score > 0 ? .green : .red)
                             }
                         }
-                        // Perf P0-4: 使用预处理的纯文本，避免 body 内正则计算
-                        Text(comment.strippedBody)
+                        // 富文本：保留评论里的链接，点击可跳转（站内画廊 → 详情页；其余 → 浏览器）
+                        Text(comment.attributedBody)
                             .font(.subheadline)
-                            .foregroundStyle(.primary)
                             .lineLimit(5) // Android: setMaxLines(5)
                     }
                     .padding(.horizontal)
@@ -805,6 +819,14 @@ struct GalleryDetailView: View {
             }
         }
         .padding(.bottom, 16)
+        .environment(\.openURL, OpenURLAction { url in
+            // 站内画廊链接 → App 内打开；其余 → 交给系统（浏览器）
+            if let gallery = CommentHTML.galleryInfo(from: url) {
+                linkGallery = gallery
+                return .handled
+            }
+            return .systemAction
+        })
     }
 
     // MARK: - Error
@@ -876,6 +898,7 @@ class GalleryDetailViewModel {
         let time: Date
         let score: Int
         let strippedBody: String  // HTML 已剥离的纯文本
+        let attributedBody: AttributedString  // 保留链接的富文本
     }
 
     /// 预编译正则 (避免每次调用都重新编译)
@@ -1032,7 +1055,8 @@ class GalleryDetailViewModel {
                 user: comment.user,
                 time: comment.time,
                 score: comment.score,
-                strippedBody: Self.stripHTML(comment.comment)
+                strippedBody: Self.stripHTML(comment.comment),
+                attributedBody: CommentHTML.attributed(comment.comment)
             )
         }
     }

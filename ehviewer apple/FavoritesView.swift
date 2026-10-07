@@ -311,6 +311,10 @@ struct FavoritesView: View {
             }
             .frame(width: 76, height: 106)
             .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .topTrailing) {
+                DownloadBadge(gid: record.gid)
+                    .padding(3)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(EhCategory(rawValue: record.category).name)
@@ -332,6 +336,17 @@ struct FavoritesView: View {
                 }
 
                 HStack(spacing: 8) {
+                    // 本地收藏 → 恒为已收藏
+                    Image(systemName: "heart.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+
+                    if let lang = record.simpleLanguage, !lang.isEmpty {
+                        Text(lang)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     if record.rating > 0 {
                         HStack(spacing: 2) {
                             Image(systemName: "star.fill")

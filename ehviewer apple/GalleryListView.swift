@@ -45,6 +45,8 @@ struct GalleryListView: View {
     @State private var selectedQuickSearch: QuickSearchRecord?
     @State private var selectedGallery: GalleryInfo?
     @FocusState private var isSearchFocused: Bool
+    /// 搜索面板里的「页数」范围弹窗（提升到此处呈现，避免搜索框抢焦点）
+    @State private var showSearchPageDialog = false
     /// 跳页模式切换 (对齐 Android JumpDateSelector: DATE_PICKER_TYPE / DATE_NODE_TYPE)
     /// 跳页模式: 0 = 快捷跳转, 1 = 日期选择, 2 = 页码跳转
     @State private var jumpMode: Int = 0
@@ -219,6 +221,13 @@ struct GalleryListView: View {
                             Button("关闭") { showTopList = false }
                         }
                     }
+            }
+        }
+        // 搜索面板「页数」范围弹窗：提升到根视图呈现，规避搜索框抢焦点
+        .sheet(isPresented: $showSearchPageDialog) {
+            PageRangeDialog(from: advancedSearch.pageFrom, to: advancedSearch.pageTo) { from, to in
+                advancedSearch.pageFrom = from
+                advancedSearch.pageTo = to
             }
         }
     }
@@ -701,6 +710,7 @@ struct GalleryListView: View {
 
                 // 跳页 (对齐 Android showGoToDialog: 统一使用跳页 Sheet，支持页码/日期/快捷跳转)
                 Button {
+                    isSearchFocused = false
                     viewModel.showJumpDialog = true
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
@@ -739,7 +749,10 @@ struct GalleryListView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         // 第一行分类 chips + 第二行筛选 chips
-                        SearchFilterPanel(state: advancedSearch)
+                        SearchFilterPanel(state: advancedSearch) {
+                            isSearchFocused = false
+                            showSearchPageDialog = true
+                        }
 
                         Divider()
 
@@ -1168,6 +1181,10 @@ struct GalleryRow: View {
             .frame(width: layout.galleryThumbnailSize.width * thumbScale,
                    height: layout.galleryThumbnailSize.height * thumbScale)
             .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .topTrailing) {
+                DownloadBadge(gid: gallery.gid)
+                    .padding(3)
+            }
 
             // 信息区 (对齐 Android RelativeLayout 右侧元素)
             VStack(alignment: .leading, spacing: 0) {

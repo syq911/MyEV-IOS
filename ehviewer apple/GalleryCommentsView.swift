@@ -20,6 +20,8 @@ struct GalleryCommentsView: View {
     
     @State private var vm = GalleryCommentsViewModel()
     @State private var composing: CommentComposeTarget?
+    /// 评论里的站内画廊链接 → 在 App 内打开目标画廊
+    @State private var linkGallery: GalleryInfo?
 
     /// 未登录时不显示发表入口 —— 点了也只会拿到服务端的拒绝
     private var canComment: Bool { AppSettings.shared.isLogin }
@@ -94,6 +96,25 @@ struct GalleryCommentsView: View {
                 }
             )
         }
+        .environment(\.openURL, OpenURLAction { url in
+            // 站内画廊链接 → App 内打开；其余 → 交给系统（浏览器）
+            if let gallery = CommentHTML.galleryInfo(from: url) {
+                linkGallery = gallery
+                return .handled
+            }
+            return .systemAction
+        })
+        .sheet(item: $linkGallery) { g in
+            NavigationStack {
+                GalleryDetailView(gallery: g)
+                    .id(g.gid)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { linkGallery = nil }
+                        }
+                    }
+            }
+        }
     }
     
     // MARK: - 单条评论
@@ -122,10 +143,9 @@ struct GalleryCommentsView: View {
                 }
             }
             
-            // 评论内容 (HTML 转纯文本，完整显示)
-            Text(comment.comment.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression))
+            // 评论内容 (保留链接的富文本，链接可点击跳转)
+            Text(CommentHTML.attributed(comment.comment))
                 .font(.subheadline)
-                .foregroundStyle(.primary)
             
             // 投票 / 编辑
             if comment.voteUpAble || comment.voteDownAble || comment.editable {

@@ -180,6 +180,16 @@ class GalleryPreviewsViewModel {
         loadedPages.insert(0)
         currentPage = 0
     }
+
+    /// 重置分页状态（详情页切换画廊时调用）
+    func reset() {
+        allPreviews = []
+        isInitialLoading = false
+        isLoadingMore = false
+        loadedPages = []
+        currentPage = 0
+        isLoading = false
+    }
     
     func loadNextPageIfNeeded(gid: Int64, token: String, totalPages: Int) async {
         guard !isLoading else { return }

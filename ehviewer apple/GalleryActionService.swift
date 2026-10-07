@@ -89,6 +89,8 @@ final class GalleryActionService {
     /// 快速下载 (Fix A-1: 已失败/已暂停的任务允许重新启动)
     func startDownload(gallery: GalleryInfo) async {
         await DownloadManager.shared.startDownload(gallery: gallery)
+        // 让各列表行的下载角标尽快刷新
+        LibraryStatusStore.shared.refreshSoon()
         // 有下载任务时立刻向系统登记后台处理任务：
         // 前台提交更容易被系统接受，App 退后台后被唤醒继续推进下载的概率更高。
         BackgroundDownloadManager.shared.scheduleBackgroundDownload()

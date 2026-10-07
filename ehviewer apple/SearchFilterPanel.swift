@@ -201,7 +201,9 @@ class AdvancedSearchState {
 
 struct SearchFilterPanel: View {
     @Bindable var state: AdvancedSearchState
-    @State private var showPageDialog = false
+    /// 请求父视图呈现「页数」范围弹窗 —— 由父视图（GalleryListView）先清除搜索框焦点再弹出，
+    /// 避免搜索框一直持有焦点、导致弹窗里的数字输入框输不进内容。
+    var onRequestPageDialog: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -209,12 +211,6 @@ struct SearchFilterPanel: View {
             filterRow
         }
         .padding(.vertical, 6)
-        .sheet(isPresented: $showPageDialog) {
-            PageRangeDialog(from: state.pageFrom, to: state.pageTo) { from, to in
-                state.pageFrom = from
-                state.pageTo = to
-            }
-        }
     }
 
     // MARK: 第一行：分类 chips（选中的排前面）
@@ -310,7 +306,7 @@ struct SearchFilterPanel: View {
             text = "页数"
         }
         return Button {
-            showPageDialog = true
+            onRequestPageDialog()
         } label: {
             chipLabel(text: text, selected: from > 0 || to > 0)
         }
@@ -361,7 +357,7 @@ struct SearchFilterPanel: View {
 
 // MARK: - 页数范围弹窗（校验失败不关闭）
 
-private struct PageRangeDialog: View {
+struct PageRangeDialog: View {
     let onConfirm: (String, String) -> Void
 
     @Environment(\.dismiss) private var dismiss

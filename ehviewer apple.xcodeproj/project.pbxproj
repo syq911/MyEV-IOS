@@ -73,6 +73,7 @@
 				"ehviewer appleTests/ehviewer_appleTests.swift",
 				"ehviewer appleTests/MangaTranslationTests.swift",
 				"ehviewer appleTests/DownloadOrderingTests.swift",
+				"ehviewer appleTests/CommentHTMLTests.swift",
 				Info.plist,
 			);
 			target = DC4A07672F3DA21800717C38 /* ehviewer apple */;
@@ -85,6 +86,7 @@
 				"ehviewer appleTests/ehviewer_appleTests.swift",
 				"ehviewer appleTests/MangaTranslationTests.swift",
 				"ehviewer appleTests/DownloadOrderingTests.swift",
+				"ehviewer appleTests/CommentHTMLTests.swift",
 			);
 			target = DC4A07782F3DA21800717C38 /* ehviewer appleTests */;
 		};

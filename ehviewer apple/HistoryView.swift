@@ -99,11 +99,33 @@ struct HistoryView: View {
                         }
                         .frame(width: 52, height: 72)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .overlay(alignment: .topTrailing) {
+                            DownloadBadge(gid: record.gid, size: 15)
+                                .padding(2)
+                        }
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(record.titleJpn ?? record.title)
                                 .font(.subheadline)
                                 .lineLimit(2)
+
+                            HStack(spacing: 6) {
+                                if LibraryStatusStore.shared.isLocalFavorite(gid: record.gid) {
+                                    Image(systemName: "heart.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.red)
+                                }
+                                if let lang = record.simpleLanguage, !lang.isEmpty {
+                                    Text(lang)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if record.pages > 0 {
+                                    Text("\(record.pages)P")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
 
                             Text(formattedTime(record.date))
                                 .font(.caption)
@@ -157,7 +179,7 @@ extension HistoryRecord {
             title: title, titleJpn: titleJpn, thumb: thumb,
             category: EhCategory(rawValue: category),
             posted: posted, uploader: uploader,
-            rating: rating, pages: pages
+            rating: rating, pages: pages, simpleLanguage: simpleLanguage
         )
     }
 }
