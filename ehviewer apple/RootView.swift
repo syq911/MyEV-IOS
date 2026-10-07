@@ -99,6 +99,11 @@ struct RootView: View {
             }
         }
         .withGlobalErrorBoundary()
+        // 下载页「一键翻译」用的 Apple 端上翻译会话 —— 挂在根视图上，
+        // 这样用户离开下载页 / 切标签页后批量翻译依然能继续
+        .translationTask(MangaTranslationBatch.shared.appleBridge.configuration) { session in
+            await MangaTranslationBatch.shared.appleBridge.run(session: session)
+        }
         // 已登录用户: 启动时异步获取资料 + ExH 检测 (不 mutate isSignedIn，不触发重渲染)
         .task {
             // 在 .task 中初始化 cachedColorScheme，打破 body 对 AppSettings.shared.theme 的直接观察

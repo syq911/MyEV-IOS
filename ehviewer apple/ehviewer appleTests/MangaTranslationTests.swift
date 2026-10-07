@@ -181,6 +181,44 @@ struct MangaTranslationTests {
         #expect(MangaTranslationCache.sanitize("ja|zh-Hans|0|deepseek-chat") == "ja_zh-Hans_0_deepseek-chat")
     }
 
+    /// 无文字的页写入空标记：仍算「已处理」，读取返回空数组而不是 nil（关键：不能反复 OCR）
+    @Test func translationCacheStoresEmptyMarker() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manga-cache-empty-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let cache = MangaTranslationCache.makeForTesting(root: tmp)
+        cache.save(gid: 5, page: 3, signature: "sig", lines: [])
+        cache.flush()
+
+        #expect(cache.hasEntry(gid: 5, page: 3, signature: "sig"))
+        let loaded = cache.load(gid: 5, page: 3, signature: "sig")
+        #expect(loaded != nil)
+        #expect(loaded?.isEmpty == true)
+        // 没有记录过的页仍然是未处理
+        #expect(!cache.hasEntry(gid: 5, page: 4, signature: "sig"))
+    }
+
+    /// 进度统计：只数当前签名的页，且空标记的页也算「已翻译」
+    @Test func translationCacheCountsTranslatedPages() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manga-cache-count-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let cache = MangaTranslationCache.makeForTesting(root: tmp)
+        let line = MangaTranslatedLine(source: "こんにちは", translated: "你好",
+                                       boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.1),
+                                       isVertical: false)
+        cache.save(gid: 9, page: 0, signature: "A", lines: [line])
+        cache.save(gid: 9, page: 1, signature: "A", lines: [])
+        cache.save(gid: 9, page: 2, signature: "B", lines: [line])
+        cache.flush()
+
+        #expect(cache.translatedPages(gid: 9, signature: "A") == [0, 1])
+        #expect(cache.translatedPages(gid: 9, signature: "B") == [2])
+        #expect(cache.translatedPages(gid: 9, signature: "C").isEmpty)
+    }
+
     // MARK: 合并去重（纯逻辑）
 
     @Test func mergeDeduplicatesOverlappingLines() {

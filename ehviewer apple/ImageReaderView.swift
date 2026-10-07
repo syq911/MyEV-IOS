@@ -1362,24 +1362,11 @@ struct ImageReaderView: View {
     }
 
     /// 翻译进度 / 失败提示浮层
+    /// 注意优先级：**进行中优先显示进度**（个别页失败不再抢占浮层，避免看起来像「停了」）；
+    /// 只有在没有页在翻、且存在失败时才提示失败。
     @ViewBuilder
     private var translationStatusOverlay: some View {
-        if let message = translate.failureMessage {
-            Button {
-                translate.dismissFailure()
-            } label: {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(12)
-                    .background(.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 40)
-            .padding(.top, 120)
-            .frame(maxHeight: .infinity, alignment: .top)
-        } else if translate.isBusy {
+        if translate.isBusy {
             VStack(spacing: 8) {
                 ProgressView().tint(.white)
                 Text("翻译中… 剩余 \(translate.pendingCount) 页")
@@ -1388,6 +1375,21 @@ struct ImageReaderView: View {
             }
             .padding(14)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(.top, 120)
+            .frame(maxHeight: .infinity, alignment: .top)
+        } else if let message = translate.failureMessage {
+            Button {
+                translate.dismissFailure()
+            } label: {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(12)
+                    .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 40)
             .padding(.top, 120)
             .frame(maxHeight: .infinity, alignment: .top)
         }

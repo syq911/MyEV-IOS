@@ -9,8 +9,11 @@
 //      直接本地重排即可；
 //    - 切到「显示原文」再切回译文、或退出阅读器重新进入时，直接命中缓存，不再调用翻译接口。
 //
-//  目录结构（位于 Caches，不参与 iCloud 备份）：
-//    Caches/MangaTranslation/<gid>/<page>__<signature>.json
+//  目录结构（位于 Application Support，**持久化存储**，重启/清理缓存都不会丢）：
+//    Application Support/MangaTranslation/<gid>/<page>__<signature>.json
+//
+//  空文件（lines 为空）表示「这一页已经处理过、但没有需要翻译的文字」，
+//  用来在进度统计里算作「已完成」，并避免后续反复 OCR 同一张无字图。
 //
 
 import Foundation
@@ -26,15 +29,32 @@ final class MangaTranslationCache: @unchecked Sendable {
     private let ioQueue = DispatchQueue(label: "Stellatrix.ehviewer-apple.manga-translation.cache")
 
     private init() {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         root = base.appendingPathComponent("MangaTranslation", isDirectory: true)
+        // 1.4.20：从旧的 Caches 目录搬到持久化的 Application Support，尽量保留老数据
+        Self.migrateFromCachesIfNeeded(to: root)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     private init(root: URL) {
         self.root = root
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    /// 一次性迁移：把旧版本存在 `Caches/MangaTranslation` 的译文搬到新的持久化目录。
+    /// 新目录已有内容时不动（避免覆盖）；旧目录不存在时直接跳过。
+    private static func migrateFromCachesIfNeeded(to root: URL) {
+        let fm = FileManager.default
+        guard let cachesBase = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let old = cachesBase.appendingPathComponent("MangaTranslation", isDirectory: true)
+        guard fm.fileExists(atPath: old.path) else { return }
+        if fm.fileExists(atPath: root.path) {
+            let isEmpty = ((try? fm.contentsOfDirectory(atPath: root.path))?.isEmpty) ?? false
+            guard isEmpty else { return }
+            try? fm.removeItem(at: root)
+        }
+        try? fm.moveItem(at: old, to: root)
     }
 
     /// 仅供测试：使用自定义根目录的独立实例，避免污染真实缓存。
@@ -79,12 +99,11 @@ final class MangaTranslationCache: @unchecked Sendable {
 
     // MARK: - 读写
 
-    /// 读取某页的译文行；命中返回非 nil
+    /// 读取某页的译文行；命中返回非 nil（空数组代表「该页已处理、无文字」）
     func load(gid: Int64, page: Int, signature: String) -> [MangaTranslatedLine]? {
         let url = fileURL(gid: gid, page: page, signature: signature)
         guard let data = try? Data(contentsOf: url),
-              let stored = try? JSONDecoder().decode(StoredPage.self, from: data),
-              !stored.lines.isEmpty else { return nil }
+              let stored = try? JSONDecoder().decode(StoredPage.self, from: data) else { return nil }
         return stored.lines.map {
             MangaTranslatedLine(
                 source: $0.source,
@@ -96,9 +115,25 @@ final class MangaTranslationCache: @unchecked Sendable {
         }
     }
 
-    /// 写入某页的译文行（异步落盘）
+    /// 某页（给定翻译签名）是否已处理过 —— 无论有无译文都算
+    func hasEntry(gid: Int64, page: Int, signature: String) -> Bool {
+        fm.fileExists(atPath: fileURL(gid: gid, page: page, signature: signature).path)
+    }
+
+    /// 该画廊在给定翻译签名下「已处理」的页码集合（含无文字的页）
+    func translatedPages(gid: Int64, signature: String) -> Set<Int> {
+        let suffix = "__\(Self.sanitize(signature)).json"
+        guard let names = try? fm.contentsOfDirectory(atPath: dir(for: gid).path) else { return [] }
+        var result: Set<Int> = []
+        for name in names where name.hasSuffix(suffix) {
+            let stem = String(name.dropLast(suffix.count))
+            if let page = Int(stem) { result.insert(page) }
+        }
+        return result
+    }
+
+    /// 写入某页的译文行（异步落盘）。允许空数组 —— 作为「该页无文字、已处理」的标记。
     func save(gid: Int64, page: Int, signature: String, lines: [MangaTranslatedLine]) {
-        guard !lines.isEmpty else { return }
         let stored = StoredPage(
             lines: lines.map {
                 StoredLine(

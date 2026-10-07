@@ -69,17 +69,16 @@ final class MangaTranslationController {
         MangaTranslationSettings.shared.provider == .appleOnDevice ? 1 : 2
     }
 
-    // MARK: - 签名
+    // MARK: - 签名（与下载页「一键翻译」共用同一套，保证两边命中同一份持久化缓存）
 
     /// 影响「翻译结果」的设置
     private func translationSignature(_ s: MangaTranslationSettings) -> String {
-        let model = s.provider == .deepSeek ? s.deepSeekModel : ""
-        return "\(s.sourceLanguage.rawValue)|\(s.targetLanguage.rawValue)|\(s.provider.rawValue)|\(model)"
+        MangaTranslationPipeline.translationSignature(s)
     }
 
     /// 只影响「排版」的设置
     private func renderSignature(_ s: MangaTranslationSettings) -> String {
-        "\(s.fontScale)|\(s.useSampledBackground)|\(s.showOriginalText)"
+        MangaTranslationPipeline.renderSignature(s)
     }
 
     // MARK: - 查询
@@ -216,8 +215,10 @@ final class MangaTranslationController {
                 lineCache[k] = onDisk
                 lineCacheSignature[k] = transSig
             } else {
-                translated = try await recognizeAndTranslate(job: job, settings: settings)
-                guard !translated.isEmpty else { throw MangaTranslationError.emptyResponse }
+                let outcome = try await MangaTranslationPipeline.translatePage(
+                    image: job.image, settings: settings, bridge: appleBridge)
+                translated = outcome.lines
+                // ★ 无文字的页也写入空标记（translated 为 []）：不再重试，且计入「已翻译」
                 lineCache[k] = translated
                 lineCacheSignature[k] = transSig
                 MangaTranslationCache.shared.save(
@@ -225,7 +226,7 @@ final class MangaTranslationController {
             }
             try Task.checkCancellation()
 
-            // 2) 渲染（纯布局，快）
+            // 2) 渲染（纯布局，快）；无文字的页直接渲染原图
             let options = MangaTypesetter.Options(
                 useSampledBackground: settings.useSampledBackground,
                 showOriginalText: settings.showOriginalText,
@@ -240,82 +241,10 @@ final class MangaTranslationController {
         } catch is CancellationError {
             // 用户关闭或翻页丢弃，静默
         } catch {
+            // 真正的失败（网络 / 图片不可用 / 无 API Key…）：提示一下，但**不中断**队列，
+            // 后续页继续翻译；失败的页不入缓存，下次进入会重试。
             diag("MangaTr: 页失败 gid=\(job.gid) page=\(job.page) —— \(error.localizedDescription)")
             if autoTranslate { failureMessage = error.localizedDescription }
-        }
-    }
-
-    /// OCR + 翻译，返回「能翻出来的那些行」（数量不齐也照常返回）
-    private func recognizeAndTranslate(
-        job: Job,
-        settings: MangaTranslationSettings
-    ) async throws -> [MangaTranslatedLine] {
-        guard let cgImage = MangaTypesetter.cgImage(of: job.image) else {
-            throw MangaTranslationError.imageUnavailable
-        }
-        let languages = settings.sourceLanguage.visionLanguages
-        let useFallback = settings.usesLineDropFallback
-        let lines: [MangaTextLine] = try await Task.detached(priority: .userInitiated) {
-            var recognizer = VisionTextRecognizer(languages: languages)
-            recognizer.usesLineDropFallback = useFallback
-            return try await recognizer.recognize(in: cgImage)
-        }.value
-        try Task.checkCancellation()
-        guard !lines.isEmpty else { throw MangaTranslationError.noTextRecognized }
-
-        let texts = lines.map(\.text)
-        var map = try await translate(
-            texts,
-            source: settings.sourceLanguage,
-            target: settings.targetLanguage,
-            provider: settings.provider
-        )
-
-        // 有条数缺失（模型漏项）→ 只针对缺失的部分补一次，尽量把能翻的都翻出来
-        let missing = lines.indices.filter { map[$0] == nil || map[$0]?.isEmpty == true }
-        if !missing.isEmpty, missing.count <= 16 {
-            let retryTexts = missing.map { texts[$0] }
-            if let retry = try? await translate(
-                retryTexts,
-                source: settings.sourceLanguage,
-                target: settings.targetLanguage,
-                provider: settings.provider) {
-                for (offset, index) in missing.enumerated() {
-                    if let text = retry[offset], !text.isEmpty { map[index] = text }
-                }
-            }
-        }
-
-        // 只渲染翻译到的行；没翻到的行保持原图（不画任何东西）
-        return lines.enumerated().compactMap { index, line in
-            guard let text = map[index],
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return MangaTranslatedLine(
-                source: line.text,
-                translated: text,
-                boundingBox: line.boundingBox,
-                isVertical: line.isVertical
-            )
-        }
-    }
-
-    private func translate(
-        _ texts: [String],
-        source: MangaTranslationSource,
-        target: MangaTranslationTarget,
-        provider: MangaTranslationProvider
-    ) async throws -> [Int: String] {
-        switch provider {
-        case .deepSeek:
-            let settings = MangaTranslationSettings.shared
-            let translator = DeepSeekTranslator(
-                apiKey: settings.deepSeekAPIKey,
-                baseURL: settings.deepSeekBaseURL,
-                model: settings.deepSeekModel
-            )
-            return try await translator.translate(texts, source: source, target: target)
-        case .appleOnDevice:
-            return try await appleBridge.translate(texts, source: source, target: target)
         }
     }
 }

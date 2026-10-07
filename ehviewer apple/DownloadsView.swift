@@ -16,6 +16,12 @@ import AppKit
 
 // MARK: - 状态过滤枚举
 
+/// 一本画廊的翻译进度（已翻译页数 / 可翻译页数）
+struct TranslationSummary: Equatable {
+    var done: Int
+    var total: Int
+}
+
 enum DownloadStatusFilter: String, CaseIterable, Identifiable {
     case all = "全部"
     case downloading = "下载中"
@@ -74,6 +80,9 @@ struct DownloadsView: View {
     @State private var totalStorageSize: Int64 = 0
     @State private var isCalculatingSize = false
     @State private var readingProgress: [Int64: Int] = [:]  // gid -> page index
+
+    // MARK: - 翻译进度（磁盘统计；运行中的任务由 MangaTranslationBatch 实时提供）
+    @State private var translationSummaries: [Int64: TranslationSummary] = [:]
 
     var body: some View {
         NavigationStack(path: $navPath) {
@@ -211,6 +220,7 @@ struct DownloadsView: View {
             loadLabels()
             await loadReadingProgress()
             await calculateStorageSizes()
+            await loadTranslationSummaries()
         }
     }
 
@@ -422,6 +432,21 @@ struct DownloadsView: View {
             return result
         }.value
         readingProgress = progress
+    }
+
+    // MARK: - 翻译进度统计
+
+    /// 从持久化存储统计每本已下载漫画的翻译完成度（供行内圆环展示）
+    @MainActor
+    private func loadTranslationSummaries() async {
+        var result: [Int64: TranslationSummary] = [:]
+        for task in vm.tasks {
+            let summary = await MangaTranslationBatch.shared.diskSummary(gid: task.gallery.gid)
+            if summary.total > 0 {
+                result[task.gallery.gid] = TranslationSummary(done: summary.done, total: summary.total)
+            }
+        }
+        translationSummaries = result
     }
 
     // MARK: - 过滤后的任务列表
@@ -711,9 +736,15 @@ struct DownloadsView: View {
 
     // MARK: - 下载列表
 
+    @MainActor
     private var downloadList: some View {
         List {
             ForEach(filteredTasks, id: \.gallery.gid) { task in
+                let live = MangaTranslationBatch.shared.jobs[task.gallery.gid]
+                let summary = translationSummaries[task.gallery.gid]
+                let tDone = live?.done ?? summary?.done ?? 0
+                let tTotal = live?.total ?? summary?.total ?? 0
+                let tRunning = live?.phase == MangaTranslationBatch.Phase.running
                 if isSelectMode {
                     HStack(spacing: 12) {
                         Image(systemName: selectedGids.contains(task.gallery.gid) ? "checkmark.circle.fill" : "circle")
@@ -754,7 +785,16 @@ struct DownloadsView: View {
                             deletingTaskGid = task.gallery.gid
                             showSingleDeleteConfirm = true
                         },
-                        onShare: { Task { await shareGallery(task.gallery) } }
+                        onShare: { Task { await shareGallery(task.gallery) } },
+                        translationDone: tDone,
+                        translationTotal: tTotal,
+                        isTranslating: tRunning,
+                        onTranslate: { Task { @MainActor in
+                            MangaTranslationBatch.shared.start(gid: task.gallery.gid)
+                        } },
+                        onCancelTranslate: { Task { @MainActor in
+                            MangaTranslationBatch.shared.cancel(gid: task.gallery.gid)
+                        } }
                     )
                 }
             }
@@ -1000,6 +1040,57 @@ private struct RowContextMenu<MenuContent: View>: ViewModifier {
     }
 }
 
+// MARK: - 翻译进度圆环
+
+/// 下载行里的「翻译进度」小圆环 —— 一圈表示整本已下载页的翻译完成度。
+/// 运行中为橙色，翻完为绿色对勾，未开始为灰色书本图标。
+struct TranslationProgressBadge: View {
+    let done: Int
+    let total: Int
+    let running: Bool
+
+    private var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(1, max(0, Double(done) / Double(total)))
+    }
+
+    private var tint: Color {
+        if running { return .orange }
+        if total > 0, done >= total { return .green }
+        if done > 0 { return .accentColor }
+        return .secondary
+    }
+
+    private var glyph: String {
+        if running { return "ellipsis" }
+        if total > 0, done >= total { return "checkmark" }
+        return "character.book.closed"
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ZStack {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.22), lineWidth: 2.5)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: glyph)
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 19, height: 19)
+
+            Text("译 \(done)/\(total)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(tint)
+                .monospacedDigit()
+        }
+        .accessibilityLabel("已翻译 \(done)/\(total) 页")
+    }
+}
+
 struct DownloadTaskRow: View {
     let task: DownloadTask
     let readingPage: Int?      // 阅读进度 (当前页索引)
@@ -1016,6 +1107,13 @@ struct DownloadTaskRow: View {
     let onResume: () -> Void
     let onRequestDelete: () -> Void   // 请求删除 (由父视图处理确认)
     let onShare: () -> Void           // 打包为 zip 并分享 (issue #2)
+    /// 翻译进度（来自 MangaTranslationBatch 实时任务或磁盘统计）
+    var translationDone: Int = 0
+    var translationTotal: Int = 0
+    var isTranslating: Bool = false
+    /// 一键翻译（只翻已下载到本地的页）
+    var onTranslate: () -> Void = {}
+    var onCancelTranslate: () -> Void = {}
 
     /// 行内子区域是否响应点击（选择模式 / 排序模式下关闭）
     private var rowInteractionEnabled: Bool { !isSelectionMode && !isReorderMode }
@@ -1076,28 +1174,40 @@ struct DownloadTaskRow: View {
                     }
                 }
 
-                // 下载页数进度条（所有状态都显示；已完成 = 满）
+                // 下载进度（短条）+ 翻译进度（圆环）同一行排布，下载条不再占满整行
                 if task.gallery.pages > 0 {
-                    VStack(spacing: 2) {
-                        ProgressView(value: downloadProgress)
-                            .tint(task.state == DownloadManager.stateFinish ? .green : .accentColor)
-                        HStack {
-                            Text("已下载 \(task.downloadedPages)/\(task.gallery.pages)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            if task.state == DownloadManager.stateDownload, task.speed > 0 {
-                                Text(Self.formatSpeed(task.speed))
+                    HStack(alignment: .center, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ProgressView(value: downloadProgress)
+                                .tint(task.state == DownloadManager.stateFinish ? .green : .accentColor)
+                            HStack(spacing: 5) {
+                                Text("已下载 \(task.downloadedPages)/\(task.gallery.pages)")
                                     .font(.caption2)
-                                    .foregroundStyle(.blue)
+                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 0)
+                                if task.state == DownloadManager.stateDownload, task.speed > 0 {
+                                    Text(Self.formatSpeed(task.speed))
+                                        .font(.caption2)
+                                        .foregroundStyle(.blue)
+                                }
+                                Text("\(Int(downloadProgress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
                             }
-                            Text("\(Int(downloadProgress * 100))%")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            }
+                        }
+                        .frame(maxWidth: .infinity)
+
+                        if translationTotal > 0 {
+                            TranslationProgressBadge(
+                                done: translationDone,
+                                total: translationTotal,
+                                running: isTranslating
+                            )
                         }
                     }
                 }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
             .modifier(RowTapZone(enabled: rowInteractionEnabled, action: onOpenReader))
         }
@@ -1124,6 +1234,23 @@ struct DownloadTaskRow: View {
                     onShare()
                 } label: {
                     Label("分享 (打包为 zip)", systemImage: "square.and.arrow.up")
+                }
+            }
+
+            // 一键翻译：只翻已经下载到本地的页，结果落盘持久化
+            if task.downloadedPages > 0, MangaTranslationSettings.shared.enabled {
+                if isTranslating {
+                    Button {
+                        onCancelTranslate()
+                    } label: {
+                        Label("停止翻译", systemImage: "stop.circle")
+                    }
+                } else {
+                    Button {
+                        onTranslate()
+                    } label: {
+                        Label("一键翻译", systemImage: "character.book.closed")
+                    }
                 }
             }
 
