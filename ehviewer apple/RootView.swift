@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Translation
 import EhSettings
 import EhAPI
 import EhCookie
