@@ -7,6 +7,7 @@
 
 import Testing
 import Foundation
+import EhModels
 @testable import ehviewer_apple
 
 struct CommentHTMLTests {
