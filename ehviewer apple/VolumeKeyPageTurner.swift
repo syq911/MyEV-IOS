@@ -39,8 +39,12 @@ final class VolumeKeyPageTurner {
     private static let noiseThreshold: Float = 0.006
     /// 判定「这是我们自己写入的复位回声」的值容差
     private static let echoTolerance: Float = 0.006
-    /// 同一次物理按键偶尔产生两个事件时的合并窗口
-    private static let coalesceWindow: TimeInterval = 0.04
+    /// 同一次物理按键偶尔产生两个事件时的合并窗口。
+    ///
+    /// 原先 40ms：快速连按时，第二次按键若落在 40ms 内会被直接丢弃，
+    /// 手感就是「按了没反应」。20ms 足以合并同一次按键的抖动回声，
+    /// 又不会挡住人手能做到的最快连按（约 100ms 一次）。
+    private static let coalesceWindow: TimeInterval = 0.02
 
     private var observation: NSKeyValueObservation?
     private var volumeView: MPVolumeView?
@@ -49,6 +53,13 @@ final class VolumeKeyPageTurner {
     private var lastAcceptedAt: TimeInterval = 0
     /// 进入时的真实音量，退出时还原给用户
     private var userVolume: Float = 0.5
+    /// 上一次「已生效」的音量（复位后的基准值，或复位失败时用户实际按到的值）。
+    ///
+    /// 方向判定改成对比这个值，而不是固定的 0.5：
+    /// 一旦某次复位没生效（MPVolumeView 的 slider 还没挂上），
+    /// 旧实现会把「0.5625 → 0.625」也算成相对 0.5 的 +0.125，
+    /// 连续几次之后音量贴到端点，delta 变成 0，按键就彻底失灵了。
+    private var lastKnownVolume: Float = 0.5
     private var onNext: () -> Void = {}
     private var onPrevious: () -> Void = {}
 
@@ -112,7 +123,8 @@ final class VolumeKeyPageTurner {
         }
         expectedEcho = nil
 
-        let delta = newVolume - Self.baseVolume
+        let delta = newVolume - lastKnownVolume
+        lastKnownVolume = newVolume
         // ② 非用户操作（外部 App / 环境噪声导致的微小变化）→ 忽略
         guard abs(delta) > Self.noiseThreshold else { return }
 
@@ -132,9 +144,22 @@ final class VolumeKeyPageTurner {
     }
 
     /// 程序化写系统音量，并登记「这次写入的回声值」以便忽略随之而来的 KVO 回调
-    private func writeSystemVolume(_ value: Float) {
-        guard let slider = volumeView?.subviews.compactMap({ $0 as? UISlider }).first else { return }
+    ///
+    /// `MPVolumeView` 的 slider 只有在视图真正进入层级后才存在。之前 `attachVolumeView`
+    /// 之后立刻写音量，如果 slider 还没生成，这次写入会被静默跳过——音量不复位，
+    /// 连按几次就漂到端点，之后 delta 归零，表现为「音量键越按越不灵」。
+    /// 这里补一次下一帧重试，并把实际写入值记进 `lastKnownVolume` 供方向判定使用。
+    private func writeSystemVolume(_ value: Float, allowRetry: Bool = true) {
+        guard let slider = volumeView?.subviews.compactMap({ $0 as? UISlider }).first else {
+            if allowRetry {
+                DispatchQueue.main.async { [weak self] in
+                    self?.writeSystemVolume(value, allowRetry: false)
+                }
+            }
+            return
+        }
         expectedEcho = value
+        lastKnownVolume = value
         slider.setValue(value, animated: false)
         slider.sendActions(for: .valueChanged)
     }

@@ -39,8 +39,16 @@ struct GalleryListView: View {
     @State private var viewModel = GalleryListViewModel()
     @State private var showQuickSearch = false
     @State private var showTagSelector = false
-    /// 热门页标题菜单 →「进入排行榜」（以 Sheet 呈现已有的 TopListView）
-    @State private var showTopList = false
+    /// 热门 / 排行榜同级切换。
+    /// 以前排行榜是标题菜单里的 Sheet（上滑弹出），和热门不在同一层；
+    /// 现在改成同一页面顶部分段，切换不该改变导航层级。
+    @State private var homeSegment: HomeSegment = .popular
+
+    /// 热门页顶部分段。只有 mode == .popular 时出现。
+    private enum HomeSegment: String, CaseIterable {
+        case popular = "热门"
+        case toplist = "排行榜"
+    }
     @State private var advancedSearch = AdvancedSearchState.load()
     @State private var selectedQuickSearch: QuickSearchRecord?
     @State private var selectedGallery: GalleryInfo?
@@ -212,39 +220,57 @@ struct GalleryListView: View {
         .onChange(of: advancedSearch.persistSignature) { _, _ in
             advancedSearch.save()
         }
-        // 热门页标题菜单 →「进入排行榜」：以 Sheet 呈现已有排行榜页
-        .sheet(isPresented: $showTopList) {
-            NavigationStack {
-                TopListView(isPushed: true)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("关闭") { showTopList = false }
-                        }
-                    }
-            }
-        }
         // 搜索面板「页数」范围弹窗：提升到根视图呈现，规避搜索框抢焦点
         .sheet(isPresented: $showSearchPageDialog) {
             PageRangeDialog(from: advancedSearch.pageFrom, to: advancedSearch.pageTo) { from, to in
                 advancedSearch.pageFrom = from
                 advancedSearch.pageTo = to
+                // 点「确定」的意图就是「按这个条件搜」，不该只把范围存起来、
+                // 再让人回去按一次搜索框。
+                isSearchFocused = false
+                viewModel.searchWithAdvanced(advancedSearch)
             }
         }
     }
 
     // iPhone 布局
+    /// 当前是否在热门页的「排行榜」分段
+    private var isShowingTopList: Bool {
+        if case .popular = mode { return homeSegment == .toplist }
+        return false
+    }
+
     private var compactContent: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // 搜索栏 (全宽，置于内容顶部)
-                searchBarView
+                // 搜索栏 (全宽，置于内容顶部)。排行榜模式不搜索，隐藏以免误导。
+                if !isShowingTopList {
+                    searchBarView
+                }
 
-                Group {
-                    if viewModel.galleries.isEmpty && viewModel.errorMessage != nil && !viewModel.isLoading {
-                        errorView
-                    } else {
-                        // 离线可用: 始终显示列表结构，加载指示器为内联行，不阻塞界面
-                        galleryList
+                // 热门 / 排行榜同级切换：两者平铺在同一页，只换内容不换层级。
+                if case .popular = mode {
+                    Picker("", selection: $homeSegment) {
+                        ForEach(HomeSegment.allCases, id: \.self) { segment in
+                            Text(segment.rawValue).tag(segment)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+                }
+
+                if isShowingTopList {
+                    // 默认「昨天」：点进排行榜想看的是刚发生的事，不是十年总榜。
+                    TopListView(isPushed: true, initialPeriod: 3, showsNavigationTitle: false)
+                } else {
+                    Group {
+                        if viewModel.galleries.isEmpty && viewModel.errorMessage != nil && !viewModel.isLoading {
+                            errorView
+                        } else {
+                            // 离线可用: 始终显示列表结构，加载指示器为内联行，不阻塞界面
+                            galleryList
+                        }
                     }
                 }
             }
@@ -631,28 +657,35 @@ struct GalleryListView: View {
             TextField("搜索", text: $viewModel.searchText)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
+                // 键盘上的回车键显示为「搜索」而不是「换行」，
+                // 否则用户按「完成」只会收起键盘（见需求：完成键也要能搜）。
+                .submitLabel(.search)
                 .onSubmit {
                     isSearchFocused = false
                     viewModel.searchWithAdvanced(advancedSearch)
                 }
                 .onChange(of: viewModel.searchText) { _, _ in
-                    viewModel.updateSuggestions()
+                    scheduleSuggestionUpdate()
                 }
                 #if os(iOS)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 #endif
 
-            // 清除按钮 (输入内容时显示)
-            if !viewModel.searchText.isEmpty {
-                Button {
-                    viewModel.searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+            // 清除按钮：**常驻**，只切换透明度与可用性。
+            // 原先写的是 `if !searchText.isEmpty { Button }`——输入第一个字符时
+            // 视图树多出一个节点，SwiftUI 会重建 TextField，中文输入法的拼写上下文
+            // 随之丢失，于是「abb」变成「a b'b'」。保持节点数恒定是这里唯一可靠的修法。
+            Button {
+                viewModel.searchText = ""
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .opacity(viewModel.searchText.isEmpty ? 0 : 1)
+            .disabled(viewModel.searchText.isEmpty)
+            .accessibilityHidden(viewModel.searchText.isEmpty)
 
             // 标签选择器 (对齐 Android 上游 TagSelectorActivity)
             // 省得用户手打 f:"big breasts$" 这种语法
@@ -671,35 +704,30 @@ struct GalleryListView: View {
         .padding(.vertical, 4)
     }
 
+    // MARK: - 搜索建议防抖
+
+    @State private var suggestionTask: Task<Void, Never>?
+
+    /// 连续输入时只在停顿后查一次建议。
+    ///
+    /// 每敲一个字符就刷新建议，会让建议列表在输入过程中反复重建；
+    /// 中文输入法正在组词时，这种重建特别容易被当成「输入被打断」。
+    /// 250ms 是「打字停顿」的常用阈值，低于它基本只是人在连续按键。
+    private func scheduleSuggestionUpdate() {
+        suggestionTask?.cancel()
+        suggestionTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            viewModel.updateSuggestions()
+        }
+    }
+
     // MARK: - 统一工具栏 (对齐 Android FAB secondaryButtons)
 
     @ToolbarContentBuilder
     private var galleryToolbar: some ToolbarContent {
-        // 热门页标题变成可点击菜单：搜索后标题显示「搜索」，点它可回到热门 / 去排行榜。
-        // 复用已有的热门页 (mode == .popular) 与排行榜页 (TopListView)，不新造页面。
-        if case .popular = mode {
-            ToolbarItem(placement: .principal) {
-                Menu {
-                    Button {
-                        enterPopularList()
-                    } label: {
-                        Label("进入热门", systemImage: "flame")
-                    }
-                    Button {
-                        enterTopList()
-                    } label: {
-                        Label("进入排行榜", systemImage: "chart.bar")
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(displayTitle)
-                            .font(.headline)
-                        Image(systemName: "chevron.down")
-                            .font(.caption2)
-                    }
-                }
-            }
-        }
+        // 热门与排行榜已改为顶部同级切换，标题不再兼作入口——
+        // 同一件事保留两个入口只会让人猜「哪个才是真的」。
         // 其余按钮 (对齐 Android FAB secondaryButtons)
         ToolbarItem(placement: .automatic) {
             HStack(spacing: 4) {
@@ -718,21 +746,6 @@ struct GalleryListView: View {
                 .disabled(viewModel.galleries.isEmpty)
             }
         }
-    }
-
-    // MARK: - 热门页标题菜单动作
-
-    /// 回到热门列表：清空搜索框并重新加载热门
-    private func enterPopularList() {
-        isSearchFocused = false
-        viewModel.searchText = ""
-        viewModel.refresh(mode: .popular)
-    }
-
-    /// 进入排行榜：复用已有排行榜页 (TopListView)，以 Sheet 呈现
-    private func enterTopList() {
-        isSearchFocused = false
-        showTopList = true
     }
 
     // MARK: - 搜索面板浮层 (分类/筛选 chips + 搜索历史/标签建议，对齐 Android SearchBarScreen)
@@ -756,10 +769,12 @@ struct GalleryListView: View {
 
                         Divider()
 
-                        // 搜索框为空 → 历史；有输入 → 标签建议
+                        // 搜索框为空 → 全部历史；有输入 → 先匹配的历史，再标签建议。
+                        // 刚搜过的东西多半还要再搜一次，历史比标签建议更可能是意图本身。
                         if viewModel.searchText.isEmpty {
                             searchHistoryList
                         } else {
+                            searchHistoryMatches
                             searchSuggestionsContent
                         }
                     }
@@ -854,6 +869,49 @@ struct GalleryListView: View {
         // 标签建议
         if !viewModel.suggestions.isEmpty {
             searchSuggestionsContent
+        }
+    }
+
+    // MARK: - 有输入时的历史匹配
+
+    /// 只显示与当前输入匹配的历史条目，排在标签建议之前。
+    @ViewBuilder
+    private var searchHistoryMatches: some View {
+        let keyword = viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matches = keyword.isEmpty ? [] : viewModel.searchHistory.filter {
+            $0.localizedCaseInsensitiveContains(keyword)
+        }
+        if !matches.isEmpty {
+            HStack {
+                Text("搜索历史")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            ForEach(matches, id: \.self) { term in
+                Button {
+                    viewModel.searchText = term
+                    isSearchFocused = false
+                    viewModel.searchWithAdvanced(advancedSearch)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "clock")
+                            .foregroundStyle(.secondary)
+                        Text(term)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                Divider().padding(.leading, 48)
+            }
         }
     }
 
@@ -1204,6 +1262,17 @@ struct GalleryRow: View {
                         .padding(.top, 2)
                 }
 
+                // 语言 (对齐 Android FooIbar: 上传者下方独立一行)
+                // 原先挤在右下角图标区，和「读至 / 页数」混在一排，扫读列表时几乎注意不到。
+                // 这里改为紧跟上传者——列表条目的阅读顺序是「标题 → 谁传的 → 什么语言」。
+                if let lang = gallery.simpleLanguage, !lang.isEmpty {
+                    Text(lang)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.top, 1)
+                }
+
                 Spacer(minLength: 4)
 
                 // 底部区域 — 评分 + 图标行 (对齐 Android rating + LinearLayout)
@@ -1215,17 +1284,13 @@ struct GalleryRow: View {
 
                     Spacer(minLength: 4)
 
-                    // 右侧图标 (对齐 Android LinearLayout: downloaded, favourited, simple_language, pages)
+                    // 右侧图标 (对齐 Android LinearLayout: downloaded, favourited, pages)
+                    // 语言已移到上传者下方独立一行，这里不再重复。
                     HStack(spacing: 6) {
                         if gallery.favoriteSlot >= 0 {
                             Image(systemName: "heart.fill")
                                 .font(.caption2)
                                 .foregroundStyle(.red)
-                        }
-                        if let lang = gallery.simpleLanguage, !lang.isEmpty {
-                            Text(lang)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
                         }
                         if let readProgress {
                             Text("读至 \(readProgress)")

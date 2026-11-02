@@ -381,24 +381,24 @@ struct PaginationAndSearchTests {
         #expect(map[2]?.lastPathComponent == "00000003.webp")
     }
 
-    /// 本地画廊必须一次铺 20 页（P2-B）
-    @Test func localGalleryPreloadWindowIsTwentyPages() {
+    /// 预取窗口上限是 100 页（1.4.21：从 20 提到 100，减少「翻到后面卡一下」）
+    @Test func preloadWindowCapsAtHundredPages() {
         let window = ReaderViewModel.preloadWindow(isDownloaded: true, budget: 6, forward: true)
 
-        #expect(ReaderViewModel.localPreloadPages == 20)
-        #expect(window.ahead == 20)
+        #expect(ReaderViewModel.maxPreloadAhead == 100)
+        #expect(window.ahead == 100)
         #expect(window.behind == 3)
     }
 
-    /// 在线画廊仍受设备预算约束，不能拿 20 个并发去锤 EH
-    @Test func onlineGalleryPreloadWindowFollowsBudget() {
+    /// 在线画廊同样铺 100 页，但保留方向倾斜：带宽优先给阅读方向那一侧
+    @Test func onlineGalleryPreloadWindowKeepsDirectionTilt() {
         let forward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: true)
-        #expect(forward.ahead == 6)
+        #expect(forward.ahead == ReaderViewModel.maxPreloadAhead)
         #expect(forward.behind == 1)
 
         let backward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: false)
         #expect(backward.ahead == 2, "逆向时前向窗口压缩到 budget/3")
-        #expect(backward.behind == 6)
+        #expect(backward.behind == ReaderViewModel.maxPreloadAhead)
     }
 
     /// 常驻窗口必须覆盖预取窗口，否则刚预取的页会被立刻淘汰（来回空转）
@@ -406,6 +406,6 @@ struct PaginationAndSearchTests {
         let viewModel = ReaderViewModel()
         viewModel.isDownloaded = true
 
-        #expect(viewModel.retentionRadius >= ReaderViewModel.localPreloadPages + 3)
+        #expect(viewModel.retentionRadius >= ReaderViewModel.maxPreloadAhead + 3)
     }
 }

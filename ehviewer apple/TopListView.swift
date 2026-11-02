@@ -13,10 +13,15 @@ import EhSettings
 struct TopListView: View {
     @State private var vm = TopListViewModel()
     @State private var selectedCategory = 0
-    @State private var selectedPeriod = 0
+    @State private var selectedPeriod: Int
 
     /// 被推入父导航栈时，不创建自己的 NavigationStack，避免嵌套
     private var isPushed: Bool = false
+
+    /// 是否由本视图自己设置导航标题。
+    /// 嵌入「热门 / 排行榜」同级切换时由容器负责标题，这里不能再覆盖，
+    /// 否则切到排行榜会把顶部标题改成「排行榜」，切回热门又改回来，观感很跳。
+    private var showsNavigationTitle: Bool = true
 
     private let periods = ["全部时间", "过去一年", "过去一个月", "昨天"]
 
@@ -24,17 +29,29 @@ struct TopListView: View {
     /// 对齐 e-hentai 真实页面: 11 全部时间 / 12 过去一年 / 13 过去一个月 / 15 昨天
     private static let periodTL = [11, 12, 13, 15]
 
-    init(isPushed: Bool = false) {
+    /// - Parameters:
+    ///   - isPushed: 嵌入父导航栈时为 true
+    ///   - initialPeriod: 初始时间维度。0 全部时间 / 1 过去一年 / 2 过去一个月 / 3 昨天
+    ///   - showsNavigationTitle: 是否自带导航标题
+    init(isPushed: Bool = false, initialPeriod: Int = 0, showsNavigationTitle: Bool = true) {
         self.isPushed = isPushed
+        self.showsNavigationTitle = showsNavigationTitle
+        // 越界钳制：periods 固定 4 项，传错值也不该让 Picker 崩
+        _selectedPeriod = State(initialValue: min(max(0, initialPeriod), 3))
     }
 
     var body: some View {
         if isPushed {
             // 父 NavigationStack (MoreTabView / MainTabView) 已注册所需 destination
-            topListContent
+            if showsNavigationTitle {
+                topListContent.navigationTitle("排行榜")
+            } else {
+                topListContent
+            }
         } else {
             NavigationStack {
                 topListContent
+                    .navigationTitle("排行榜")
                     // 与全 App 保持一致：全部走 value-based 导航，避免与顶层
                     // NavigationStack 里的 destination-based 链接混用导致路径错乱
                     .navigationDestination(for: GalleryInfo.self) { gallery in
@@ -98,7 +115,8 @@ struct TopListView: View {
                 topListBody
             }
         }
-        .navigationTitle("排行榜")
+        // 标题由容器决定（见 showsNavigationTitle）：嵌在「热门 / 排行榜」切换里时，
+        // 标题应保持「热门」而不是跟着分段跳成「排行榜」。
         .onChange(of: vm.categoryNames) { _, names in
             if selectedCategory >= names.count {
                 selectedCategory = 0

@@ -207,11 +207,21 @@ class ReaderViewModel {
         return cache
     }()
 
-    /// 本地已下载画廊的预取窗口 —— 纯磁盘读取，无网络压力，
-    /// 一次铺满 20 页，做到「打开即载、翻页立刻可见」(1.4.1 计划 P2-B)。
-    /// 在线画廊仍走设备预算 (platformPreloadBudget)，不能拿 20 个并发去锤 EH。
+    /// 预取窗口上限：当前页往后最多备 100 页。
+    ///
+    /// 从 20 提到 100 是产品决定：现代手机内存足够，而漫画阅读的痛点是
+    /// 「翻到后面卡一下」——提前铺满比按需加载更接近「随便翻都不卡」。
+    ///
+    /// 两个前提保证它不会把内存撑爆：
+    /// 1. 解码走 ImageIO 降采样（见 `downsampledImage`），长条漫也不会按原尺寸常驻；
+    /// 2. `retainedCostLimit` 仍是硬上限，真到阈值会从最远的页开始淘汰。
+    ///    也就是说「尽量铺 100 页，内存吃紧时自动收窄」，不是无条件保留。
+    ///
+    /// 在线画廊同样是 100 页窗口，但 `preload(around:)` 按 5 页一批推进，
+    /// 不会一次向站点发 100 个并发请求。
+    ///
     /// nonisolated: 常量，单元测试需在非 MainActor 上下文读取。
-    nonisolated static let localPreloadPages = 20
+    nonisolated static let maxPreloadAhead = 100
 
     /// cachedImages 这层的常驻解码字节上限 —— NSCache 的 costLimit 只能约束缓存自身，
     /// 管不住 Observable 字典持有的引用。长条漫单页降采样后仍可达 40MB，
@@ -1188,8 +1198,9 @@ class ReaderViewModel {
     /// 需要常驻 Observable 层的页数 —— 必须 ≥ 预加载窗口，
     /// 否则刚预加载好的页会被 evictDistantPages 立刻扔掉，来回空转
     var retentionRadius: Int {
-        // 本地画廊窗口是 20 页，常驻范围必须跟着放大，否则预取完立刻被淘汰
-        isDownloaded ? Self.localPreloadPages + 4 : max(5, effectivePreloadCount + 2)
+        // 常驻范围必须 ≥ 预取窗口，否则刚预加载好的页会被 evictDistantPages
+        // 立刻扔掉，来回空转。窗口提到 100 后这里也同步放大。
+        Self.maxPreloadAhead + 4
     }
 
     /// 预取窗口计算 —— 纯函数，便于回归测试 (1.4.1 计划 P2-B/P2-D)
@@ -1202,11 +1213,13 @@ class ReaderViewModel {
         forward: Bool
     ) -> (ahead: Int, behind: Int) {
         if isDownloaded {
-            return (localPreloadPages, 3)
+            return (maxPreloadAhead, 3)
         }
+        // 在线画廊保留方向倾斜：往后翻时后面铺满 100 页、回头只留少量；
+        // 往前翻时反过来。总量仍是 100，只是把带宽优先给阅读方向。
         return (
-            forward ? budget : max(1, budget / 3),
-            forward ? max(1, budget / 4) : budget
+            forward ? maxPreloadAhead : max(1, budget / 3),
+            forward ? max(1, budget / 4) : maxPreloadAhead
         )
     }
 
@@ -1227,8 +1240,9 @@ class ReaderViewModel {
         )
         let ahead = window.ahead
         let behind = window.behind
-        // 本地画廊是纯磁盘 + 解码，批次可以大一些；在线画廊仍按小批推进
-        let batchSize = isDownloaded ? 5 : 3
+        // 一批 5 页：用户打开后最先看到的 5 页必须在第一批里凑齐，
+        // 否则会出现「前几页还在转圈，第 20 页已经好了」。
+        let batchSize = 5
 
         let lo = max(0, page - behind)
         let hi = min(totalPages - 1, page + ahead)

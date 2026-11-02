@@ -359,6 +359,10 @@ struct ImageReaderView: View {
     // MARK: - Setup
 
     private func setupReader() {
+        // 阅读器里横滑是翻页：全屏返回只认左边缘 20pt 起手，
+        // 否则用户每翻一页都会被退出阅读器（见 FullScreenSwipeBack）。
+        FullScreenSwipeBack.shared.requiresEdgeStart = true
+
         readingDirection = ReadingDirection(rawValue: AppSettings.shared.readingDirection) ?? .topToBottom
         scaleMode = ScaleMode(rawValue: AppSettings.shared.pageScaling) ?? .fit
         startPosition = StartPosition(rawValue: AppSettings.shared.startPosition) ?? .topRight
@@ -406,6 +410,8 @@ struct ImageReaderView: View {
     }
 
     private func cleanupReader() {
+        // 退出阅读器后恢复全屏返回
+        FullScreenSwipeBack.shared.requiresEdgeStart = false
         #if os(iOS)
         UIApplication.shared.isIdleTimerDisabled = false
         UIDevice.current.isBatteryMonitoringEnabled = false
@@ -1395,6 +1401,72 @@ struct ImageReaderView: View {
         }
     }
 
+    // MARK: - 拖动进度条的缩略图浮层
+
+    /// 拖动进度条时，在滑杆正上方冒出周边几页的缩略图 + 页码。
+    ///
+    /// 放正上方而不是跟随手指：拖到屏幕边缘时浮层不会跑出可视区。
+    /// 只取**已缓存**的页——拖动过程中现场解码会让手感明显变卡；
+    /// 没缓存的位置留暗块，整条浮层的宽度仍然稳定，不会忽宽忽窄。
+    @ViewBuilder
+    private var seekThumbnailStrip: some View {
+        if vm.totalPages > 0 {
+            let center = currentLogicalPage
+            let first = max(0, center - 2)
+            let last = min(max(0, vm.totalPages - 1), center + 2)
+
+            VStack(spacing: 4) {
+                Text("\(center + 1) / \(vm.totalPages)")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+
+                HStack(spacing: 4) {
+                    ForEach(first...last, id: \.self) { page in
+                        seekThumbnail(page: page, isCurrent: page == center)
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(.white.opacity(0.15), lineWidth: 1)
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        }
+    }
+
+    @ViewBuilder
+    private func seekThumbnail(page: Int, isCurrent: Bool) -> some View {
+        let height: CGFloat = isCurrent ? 56 : 40
+        let width: CGFloat = height * 0.72
+
+        Group {
+            if let image = vm.cachedImages[page] {
+                #if os(iOS)
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                #else
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                #endif
+            } else {
+                Color.white.opacity(0.12)
+            }
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(isCurrent ? Color.white : Color.white.opacity(0.12),
+                        lineWidth: isCurrent ? 2 : 1)
+        )
+    }
+
     private var bottomBar: some View {
         VStack(spacing: 8) {
             // 阅读方向提示
@@ -1408,6 +1480,11 @@ struct ImageReaderView: View {
                 }
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.6))
+            }
+
+            // 拖动进度条时，在滑杆上方冒出周边几页的缩略图 + 页码
+            if isSeeking {
+                seekThumbnailStrip
             }
 
             HStack(spacing: 16) {
