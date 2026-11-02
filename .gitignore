@@ -57,3 +57,6 @@ generate_icons.py
 
 # Default profiling data
 default.profraw
+
+# 本地工作区笔记（不进仓库）
+.workbuddy/
