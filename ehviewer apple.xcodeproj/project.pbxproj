@@ -74,6 +74,7 @@
 				"ehviewer appleTests/MangaTranslationTests.swift",
 				"ehviewer appleTests/DownloadOrderingTests.swift",
 				"ehviewer appleTests/CommentHTMLTests.swift",
+				"ehviewer appleTests/SwipeBackTests.swift",
 				Info.plist,
 			);
 			target = DC4A07672F3DA21800717C38 /* ehviewer apple */;
@@ -87,6 +88,7 @@
 				"ehviewer appleTests/MangaTranslationTests.swift",
 				"ehviewer appleTests/DownloadOrderingTests.swift",
 				"ehviewer appleTests/CommentHTMLTests.swift",
+				"ehviewer appleTests/SwipeBackTests.swift",
 			);
 			target = DC4A07782F3DA21800717C38 /* ehviewer appleTests */;
 		};
@@ -455,7 +457,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-apple";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -501,7 +503,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-apple";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -644,7 +646,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-appleTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
@@ -670,7 +672,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-appleTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
@@ -695,7 +697,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-appleUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
@@ -720,7 +722,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-appleUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = auto;
@@ -753,7 +755,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-apple.EhDownloadWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -784,7 +786,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.21;
+				MARKETING_VERSION = 1.4.22;
 				PRODUCT_BUNDLE_IDENTIFIER = "Stellatrix.ehviewer-apple.EhDownloadWidget";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

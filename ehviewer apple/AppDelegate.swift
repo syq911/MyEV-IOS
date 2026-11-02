@@ -31,11 +31,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         diag("didFinishLaunching: 进入")
 
-        // 全屏滑动返回（知乎式）：放开系统边缘手势的「必须从边缘起手」限制，
-        // 并给每个导航控制器挂一个全屏 pan。必须在首个导航控制器出现前装好 swizzle，
-        // 否则已经创建的那个会漏掉。
-        FullScreenSwipeBack.installGlobally()
-        diag("didFinishLaunching: FullScreenSwipeBack 已安装")
+        // 全屏滑动返回由 SwipeBack（挂在 window 上）负责，
+        // 安装点在根视图 `.installSwipeBack()` —— 那里才拿得到 window。
+        diag("didFinishLaunching: 滑动返回由根视图安装")
 
         // 注册后台任务
         BackgroundDownloadManager.shared.registerBackgroundTasks()

@@ -105,6 +105,11 @@ struct EhViewerApp: App {
         let _ = NSLog("[RENDER] EhViewerApp body — 如果此行反复出现，说明 App 级重渲染")
         WindowGroup {
             RootView()
+                #if os(iOS)
+                // 全屏右滑返回：挂在根视图上，手势最终落在 window，
+                // 因此对所有页面/层级都生效，不需要逐个页面加修饰符
+                .installSwipeBack()
+                #endif
         }
         #if os(macOS)
         .defaultSize(width: 1100, height: 750)

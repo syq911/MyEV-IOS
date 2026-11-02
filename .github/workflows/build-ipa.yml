@@ -6,6 +6,7 @@ on:
   push:
     branches: ["**"]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 # 同一分支只保留最新一次构建，避免排队堆积
@@ -37,14 +38,14 @@ jobs:
             -scheme "ehviewer apple"
 
       # 归档阶段不签名（CODE_SIGNING_ALLOWED=NO）；ad-hoc 签名在打包步骤里用 codesign 完成。
-      # 版本号优先取 tag（v1.4.21 → 1.4.21），分支构建用同一默认值；这样 tag 与 ipa 内版本永不漂移。
+      # 版本号优先取 tag（v1.4.22 → 1.4.22），分支构建用同一默认值；这样 tag 与 ipa 内版本永不漂移。
       - name: Resolve marketing version
         id: ver
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="1.4.21"
+            VERSION="1.4.22"
           fi
           echo "版本号: $VERSION"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
@@ -122,9 +123,15 @@ jobs:
 
   # Phase 5：回归测试 gate。与打包 job 相互独立 —— 即便测试挂了，ipa 产物照样上传，
   # 便于「先能装、再修测试」，但 workflow 整体会标红提醒。
+  #
+  # ⚠️ 只在 tag（发版）、PR、手动触发时跑：macOS runner 的分钟数按 10 倍计费，
+  #    一次 push 同时跑打包 + 测试就要吃掉两份额度，很容易把当月配额烧光
+  #    （实测表现：job 一直 "Waiting for a runner"，15 分钟后被系统取消）。
+  #    日常 push 只打包，够用来装机验证；正式发版前由 tag 触发完整测试。
   test:
     runs-on: macos-latest
     timeout-minutes: 30
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4

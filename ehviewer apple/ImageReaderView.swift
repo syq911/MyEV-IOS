@@ -359,9 +359,10 @@ struct ImageReaderView: View {
     // MARK: - Setup
 
     private func setupReader() {
-        // 阅读器里横滑是翻页：全屏返回只认左边缘 20pt 起手，
-        // 否则用户每翻一页都会被退出阅读器（见 FullScreenSwipeBack）。
-        FullScreenSwipeBack.shared.requiresEdgeStart = true
+        // 阅读器是全屏模态（fullScreenCover），不在导航栈里：
+        // 登记成「可右滑关闭的模态」，退出方向才会是向右。
+        // 阅读器里横滑是翻页，所以模态路径只认左边缘 24pt 起手。
+        SwipeBackCoordinator.shared.readerDidAppear()
 
         readingDirection = ReadingDirection(rawValue: AppSettings.shared.readingDirection) ?? .topToBottom
         scaleMode = ScaleMode(rawValue: AppSettings.shared.pageScaling) ?? .fit
@@ -410,8 +411,8 @@ struct ImageReaderView: View {
     }
 
     private func cleanupReader() {
-        // 退出阅读器后恢复全屏返回
-        FullScreenSwipeBack.shared.requiresEdgeStart = false
+        // 退出阅读器后解除模态登记
+        SwipeBackCoordinator.shared.readerDidDisappear()
         #if os(iOS)
         UIApplication.shared.isIdleTimerDisabled = false
         UIDevice.current.isBatteryMonitoringEnabled = false
