@@ -37,14 +37,14 @@ jobs:
             -scheme "ehviewer apple"
 
       # 归档阶段不签名（CODE_SIGNING_ALLOWED=NO）；ad-hoc 签名在打包步骤里用 codesign 完成。
-      # 版本号优先取 tag（v1.4.1 → 1.4.1），分支构建用默认值；这样 tag 与 ipa 内版本永不漂移。
+      # 版本号优先取 tag（v1.4.21 → 1.4.21），分支构建用同一默认值；这样 tag 与 ipa 内版本永不漂移。
       - name: Resolve marketing version
         id: ver
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="1.4.1"
+            VERSION="1.4.21"
           fi
           echo "版本号: $VERSION"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
