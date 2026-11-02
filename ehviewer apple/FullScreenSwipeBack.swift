@@ -23,23 +23,20 @@
 import UIKit
 import ObjectiveC
 
-@MainActor
+/// 不加 `@MainActor`：本类只在主线程被调用（启动时安装、viewDidAppear、手势回调），
+/// 但 `requiresEdgeStart` 的读写来自 SwiftUI 视图、`shared` 的初始化发生在静态属性上。
+/// 一旦标成 `@MainActor`，`static let shared = FullScreenSwipeBack()` 就成了
+/// 「在 nonisolated 上下文调用 main actor 隔离的 init」——这是硬错误（不是警告），
+/// 而且报错点指向单例本身，很难一眼看出跟隔离有关。
+/// UIKit 在 Swift 5 语言模式下按 @preconcurrency 导入，从非隔离上下文调用不会报错，
+/// 与本项目其它单例（BackgroundDownloadManager 等）的写法一致。
 final class FullScreenSwipeBack: NSObject, UIGestureRecognizerDelegate {
 
-    /// 不做 `@MainActor` 隔离的共享实例：它只在主线程被读写（启动时安装、
-    /// 阅读器进入/退出时开关），但 `installGlobally()` 的调用点是
-    /// `didFinishLaunching`，而 `requiresEdgeStart` 的读写来自 SwiftUI 视图——
-    /// 两者跨隔离需要 `Task` 跳转，会让「是否只认边缘」晚一帧生效，
-    /// 正好卡在进入阅读器的那一帧上。一个布尔开关的读写竞争可以忽略。
-    nonisolated(unsafe) static let shared = FullScreenSwipeBack()
+    static let shared = FullScreenSwipeBack()
 
     /// 为 true 时只在左边缘 20pt 内起手才算返回（阅读器用）。
     /// 阅读器里横向滑动是翻页，全屏返回必须让位。
-    ///
-    /// 用 `nonisolated(unsafe)` 而不是 `@MainActor`：阅读器的 setup/cleanup 是
-    /// SwiftUI 视图方法，不保证静态隔离；一个布尔开关的读写竞争可以忽略，
-    /// 但为了省掉跨隔离的 `Task` 跳转（会让标志晚一帧生效），这里直接放开。
-    nonisolated(unsafe) var requiresEdgeStart = false
+    var requiresEdgeStart = false
 
     /// 已经装过的导航控制器（避免重复挂手势）
     private let installed = NSHashTable<UINavigationController>.weakObjects()
