@@ -26,7 +26,12 @@ import ObjectiveC
 @MainActor
 final class FullScreenSwipeBack: NSObject, UIGestureRecognizerDelegate {
 
-    static let shared = FullScreenSwipeBack()
+    /// 不做 `@MainActor` 隔离的共享实例：它只在主线程被读写（启动时安装、
+    /// 阅读器进入/退出时开关），但 `installGlobally()` 的调用点是
+    /// `didFinishLaunching`，而 `requiresEdgeStart` 的读写来自 SwiftUI 视图——
+    /// 两者跨隔离需要 `Task` 跳转，会让「是否只认边缘」晚一帧生效，
+    /// 正好卡在进入阅读器的那一帧上。一个布尔开关的读写竞争可以忽略。
+    nonisolated(unsafe) static let shared = FullScreenSwipeBack()
 
     /// 为 true 时只在左边缘 20pt 内起手才算返回（阅读器用）。
     /// 阅读器里横向滑动是翻页，全屏返回必须让位。
@@ -50,10 +55,17 @@ final class FullScreenSwipeBack: NSObject, UIGestureRecognizerDelegate {
     }
 
     private static func swizzleViewDidAppear() {
-        let original = #selector(UINavigationController.viewDidAppear(_:))
-        let swizzled = #selector(UINavigationController.fsb_viewDidAppear(_:))
-        guard let m1 = class_getInstanceMethod(UINavigationController.self, original),
-              let m2 = class_getInstanceMethod(UINavigationController.self, swizzled) else { return }
+        // 注意：不能对 `UINavigationController.viewDidAppear` 做交换。
+        // UINavigationController 自己没实现它，`class_getInstanceMethod` 拿到的是
+        // **父类 UIViewController 的实现**，交换就会改掉 UIViewController 本身——
+        // 于是所有普通视图控制器调用 viewDidAppear 时都会走进我们的实现，
+        // 而 `fsb_viewDidAppear` 当时只注册在 UINavigationController 上，
+        // 结果就是 unrecognized selector（整个 App 每次界面出现都崩）。
+        // 所以：方法注册在 UIViewController 上，进来再判断是不是导航控制器。
+        let original = #selector(UIViewController.viewDidAppear(_:))
+        let swizzled = #selector(UIViewController.fsb_viewDidAppear(_:))
+        guard let m1 = class_getInstanceMethod(UIViewController.self, original),
+              let m2 = class_getInstanceMethod(UIViewController.self, swizzled) else { return }
         method_exchangeImplementations(m1, m2)
     }
 
@@ -103,6 +115,9 @@ final class FullScreenSwipeBack: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
         guard let nav = navFor(gesture), nav.viewControllers.count > 1 else { return false }
+        // 转场进行中再起手会撞车（系统自己的 delegate 也会做这个判断，
+        // 换成我们之后必须补上，否则快速连滑会出现栈错乱）
+        guard nav.transitionCoordinator == nil else { return false }
 
         // 系统边缘手势：栈里能返回就允许。
         // 这一条修的是「导航栏隐藏后边缘手势失效」——系统的默认实现依赖导航栏状态。
@@ -123,19 +138,27 @@ final class FullScreenSwipeBack: NSObject, UIGestureRecognizerDelegate {
         return true
     }
 
-    /// 不与其它手势同时识别：横向滚动列表里，返回手势一旦开始就该独占。
+    /// 只跟滚动视图的手势共存，其余一律独占。
+    ///
+    /// 返回 false 的初衷是不跟翻页/分页手势抢，但那个「false」也会作用到
+    /// 系统边缘手势上（我们同时是它的 delegate）——列表页里边滚边滑边缘就废了。
+    /// 所以对滚动视图放行：纵向滚动和横向返回本来就是互不干扰的两件事。
     func gestureRecognizer(_ gesture: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        false
+        if let scroll = other.view as? UIScrollView, other === scroll.panGestureRecognizer {
+            return true
+        }
+        return false
     }
 }
 
-extension UINavigationController {
-    /// 交换实现：每次导航控制器出现时挂一次全屏返回。
+extension UIViewController {
+    /// 交换实现：每次任何视图控制器出现时都走一遍，只有导航控制器才挂全屏返回。
     @objc fileprivate func fsb_viewDidAppear(_ animated: Bool) {
         // 交换后这里调用的是原实现
         self.fsb_viewDidAppear(animated)
-        FullScreenSwipeBack.shared.install(on: self)
+        guard let nav = self as? UINavigationController else { return }
+        FullScreenSwipeBack.shared.install(on: nav)
     }
 }
 #endif

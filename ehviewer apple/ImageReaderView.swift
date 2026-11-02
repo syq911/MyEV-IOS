@@ -1411,7 +1411,7 @@ struct ImageReaderView: View {
     @ViewBuilder
     private var seekThumbnailStrip: some View {
         if vm.totalPages > 0 {
-            let center = currentLogicalPage
+            let center = displayedPage
             let first = max(0, center - 2)
             let last = min(max(0, vm.totalPages - 1), center + 2)
 

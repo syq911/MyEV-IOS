@@ -217,8 +217,8 @@ class ReaderViewModel {
     /// 2. `retainedCostLimit` 仍是硬上限，真到阈值会从最远的页开始淘汰。
     ///    也就是说「尽量铺 100 页，内存吃紧时自动收窄」，不是无条件保留。
     ///
-    /// 在线画廊同样是 100 页窗口，但 `preload(around:)` 按 5 页一批推进，
-    /// 不会一次向站点发 100 个并发请求。
+    /// 在线画廊不套用这个窗口：预取走的是网络原图，一次会话往后 100 张会触发
+    /// 站点带宽限制，代价远大于「翻页慢一拍」。在线仍按设备预算推进（见 `preloadWindow`）。
     ///
     /// nonisolated: 常量，单元测试需在非 MainActor 上下文读取。
     nonisolated static let maxPreloadAhead = 100
@@ -1200,13 +1200,16 @@ class ReaderViewModel {
     var retentionRadius: Int {
         // 常驻范围必须 ≥ 预取窗口，否则刚预加载好的页会被 evictDistantPages
         // 立刻扔掉，来回空转。窗口提到 100 后这里也同步放大。
-        Self.maxPreloadAhead + 4
+        isDownloaded ? Self.maxPreloadAhead + 4 : max(5, effectivePreloadCount + 2)
     }
 
     /// 预取窗口计算 —— 纯函数，便于回归测试 (1.4.1 计划 P2-B/P2-D)
     ///
-    /// - 本地已下载画廊: 固定 20 页前向窗口 + 3 页回看余量（纯磁盘读取，无网络压力）
-    /// - 在线画廊: 设备预算 + 阅读方向倾斜，不能拿 20 个并发去锤 EH
+    /// - 本地已下载画廊: 固定 100 页前向窗口 + 3 页回看余量（纯磁盘读取，无网络压力）
+    /// - 在线画廊: 仍是设备预算 + 阅读方向倾斜。
+    ///   这里**不**跟着放到 100 页是刻意的：一次会话往后预取 100 张原图会实实在在地
+    ///   吃掉站点带宽，EH 对图片带宽超限的处理是临时封 IP——那是比「翻页慢一拍」
+    ///   严重得多的故障，且用户无法自行恢复。想要在线也铺满，得先确认这个代价。
     nonisolated static func preloadWindow(
         isDownloaded: Bool,
         budget: Int,
@@ -1215,11 +1218,9 @@ class ReaderViewModel {
         if isDownloaded {
             return (maxPreloadAhead, 3)
         }
-        // 在线画廊保留方向倾斜：往后翻时后面铺满 100 页、回头只留少量；
-        // 往前翻时反过来。总量仍是 100，只是把带宽优先给阅读方向。
         return (
-            forward ? maxPreloadAhead : max(1, budget / 3),
-            forward ? max(1, budget / 4) : maxPreloadAhead
+            forward ? budget : max(1, budget / 3),
+            forward ? max(1, budget / 4) : budget
         )
     }
 

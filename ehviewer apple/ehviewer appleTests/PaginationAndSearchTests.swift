@@ -390,15 +390,15 @@ struct PaginationAndSearchTests {
         #expect(window.behind == 3)
     }
 
-    /// 在线画廊同样铺 100 页，但保留方向倾斜：带宽优先给阅读方向那一侧
-    @Test func onlineGalleryPreloadWindowKeepsDirectionTilt() {
+    /// 在线画廊仍受设备预算约束：不能拿 100 个原图请求去锤站点带宽
+    @Test func onlineGalleryPreloadWindowFollowsBudget() {
         let forward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: true)
-        #expect(forward.ahead == ReaderViewModel.maxPreloadAhead)
+        #expect(forward.ahead == 6)
         #expect(forward.behind == 1)
 
         let backward = ReaderViewModel.preloadWindow(isDownloaded: false, budget: 6, forward: false)
         #expect(backward.ahead == 2, "逆向时前向窗口压缩到 budget/3")
-        #expect(backward.behind == ReaderViewModel.maxPreloadAhead)
+        #expect(backward.behind == 6)
     }
 
     /// 常驻窗口必须覆盖预取窗口，否则刚预取的页会被立刻淘汰（来回空转）
