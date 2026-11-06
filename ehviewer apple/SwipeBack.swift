@@ -270,10 +270,12 @@ final class SwipeBackCoordinator: NSObject, UIGestureRecognizerDelegate {
     }
 
     private func commit(dx: CGFloat, velocityX: CGFloat) {
-        guard let target else { return }
+        // 注意变量名不要用 target：`guard let target` 会遮蔽属性，
+        // 后面 `target = nil` 就变成给常量赋值了
+        guard let resolved = target else { return }
         let shouldCommit = policy.shouldCommit(dx: dx, velocityX: velocityX)
 
-        switch target {
+        switch resolved {
         case .navigation(_):
             guard didBeginPop else { rollback(); return }
             if shouldCommit {
@@ -300,8 +302,8 @@ final class SwipeBackCoordinator: NSObject, UIGestureRecognizerDelegate {
     }
 
     private func rollback() {
-        guard let target else { return }
-        switch target {
+        guard let resolved = target else { return }
+        switch resolved {
         case .navigation(_):
             if didBeginPop { popDriver.cancel() }
         case .modal(let controller):
@@ -382,8 +384,9 @@ final class SwipeBackCoordinator: NSObject, UIGestureRecognizerDelegate {
     // MARK: UIGestureRecognizerDelegate
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        guard gesture === pan, let window else { return false }
-        let translation = gesture.translation(in: window)
+        // 协议参数类型是基类 UIGestureRecognizer，`translation(in:)` 在 pan 上才有
+        guard gesture === pan, let window, let probe = gesture as? UIPanGestureRecognizer else { return false }
+        let translation = probe.translation(in: window)
         let dx = translation.x
         let dy = translation.y
         // 只认「向右的横滑」，纵向滚动、左滑一律放行给页面自己
@@ -392,7 +395,7 @@ final class SwipeBackCoordinator: NSObject, UIGestureRecognizerDelegate {
         // 目标必须在这里解析：`shouldBegin` 是手势放行的唯一闸口，
         // 而状态 `.began` 是它**之后**才送达的——上一版把解析写在 `.began` 里，
         // 于是这里永远读到 nil、手势从不开始，表现就是「完全没效果」。
-        let point = gesture.location(in: window)
+        let point = probe.location(in: window)
         guard let resolved = resolveTarget(in: window, at: point) else {
             target = nil
             return false
