@@ -131,9 +131,7 @@ jobs:
   test:
     runs-on: macos-latest
     timeout-minutes: 30
-    # TODO(发版前移除)：fix/1.4.22 是当前开发分支，需要在这一分支上跑完整测试。
-    # tag 发布时本行会被一并移除，最终只保留 tag / PR / 手动触发。
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/fix/1.4.21' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
