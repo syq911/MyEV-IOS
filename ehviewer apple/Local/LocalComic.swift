@@ -252,7 +252,7 @@ final class LocalComicStorage {
 
     func pageURLs(in directory: URL) -> [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        let images = names.filter { LocalComicImporter.isImageFileName($0) }
+        let images = names.filter { LocalComicImportPlan.isImageFileName($0) }
         return NaturalSort.sorted(images).map { directory.appendingPathComponent($0, isDirectory: false) }
     }
 
