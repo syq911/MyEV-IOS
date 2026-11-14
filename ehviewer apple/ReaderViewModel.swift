@@ -677,6 +677,23 @@ class ReaderViewModel {
         diag("setupLocalGallery: 完成 isDownloaded=\(isDownloaded) 本地页数=\(localFileURLs.count)")
     }
 
+    /// 本地漫画：页面来自一组**已排好序**的文件，和下载目录无关
+    ///
+    /// 为什么不复用 `setupLocalGallery`：那条路要先去 DownloadManager 查 gid 对应的下载目录，
+    /// 本地漫画没有 gid（用的是负数伪 id），查不到就会退回网络。这里直接铺映射表，
+    /// 之后 `loadPage` 走的是现成的「本地文件 → ImageIO 解码」分支。
+    func setupLocalPages(_ urls: [URL]) {
+        var map: [Int: URL] = [:]
+        for (index, url) in urls.enumerated() {
+            map[index] = url
+        }
+        localFileURLs = map
+        downloadDir = urls.first?.deletingLastPathComponent()
+        isDownloaded = true
+        totalPages = urls.count
+        diag("setupLocalPages: \(urls.count) 页")
+    }
+
     func extractPTokens(from previewSet: PreviewSet) {
         let urls: [String]
         switch previewSet {

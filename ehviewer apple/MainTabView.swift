@@ -43,6 +43,7 @@ struct MainTabView: View {
 
     enum Tab: String, CaseIterable {
         case home = "首页"
+        case local = "本地"
         case subscription = "订阅"
         case popular = "热门"
         case toplist = "排行榜"
@@ -55,6 +56,7 @@ struct MainTabView: View {
         var icon: String {
             switch self {
             case .home: return "house"
+            case .local: return "folder"
             case .subscription: return "bell"
             case .popular: return "flame"
             case .toplist: return "chart.bar"
@@ -67,7 +69,9 @@ struct MainTabView: View {
         }
 
         /// 固定的底部默认标签页
-        private static let defaultBottomTabs: [Tab] = [.home, .favorites, .downloads, .settings, .more]
+        /// 底部标签：iOS 在超过 5 个时会自动把多出来的收进系统 More 页，
+        /// 这里刻意把「本地」放进来（用户要求），接受它被折叠进 More 的观感。
+        private static let defaultBottomTabs: [Tab] = [.home, .local, .favorites, .downloads, .settings, .more]
 
         /// iPhone 底部显示的标签页 — 根据启动页面设置动态调整
         /// 如果启动页不在默认底部栏中 (热门/排行榜/历史)，替换首页位置
@@ -271,6 +275,8 @@ struct MainTabView: View {
         switch tab {
         case .home:
             GalleryListView(mode: .home)
+        case .local:
+            LocalComicsView()
         case .subscription:
             GalleryListView(mode: .subscription)
         case .popular:

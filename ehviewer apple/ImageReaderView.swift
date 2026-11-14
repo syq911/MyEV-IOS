@@ -38,6 +38,14 @@ struct ImageReaderView: View {
     /// 初始页面 (0-based, 对齐 Android GalleryActivityEvent.page)
     let initialPage: Int?
 
+    /// 本地漫画的页文件。非 nil 时进入「本地模式」：
+    /// 不查下载目录、不请求画廊信息、不写在线历史，页面直接从这个数组取。
+    var localPages: [URL]? = nil
+    /// 本地漫画标题（仅用于诊断与将来在阅读器里展示）
+    var localTitle: String? = nil
+    /// 阅读进度回调：本地漫画需要写回自己的书库（在线画廊走 UserDefaults + 历史表）
+    var onLocalProgress: ((Int) -> Void)? = nil
+
     @State private var vm: ReaderViewModel
     @State private var showOverlay = true
     @State private var showSettings = false
@@ -104,13 +112,19 @@ struct ImageReaderView: View {
         token: String,
         pages: Int,
         previewSet: PreviewSet? = nil,
-        initialPage: Int? = nil
+        initialPage: Int? = nil,
+        localPages: [URL]? = nil,
+        localTitle: String? = nil,
+        onLocalProgress: ((Int) -> Void)? = nil
     ) {
         self.gid = gid
         self.token = token
         self.pages = pages
         self.previewSet = previewSet
         self.initialPage = initialPage
+        self.localPages = localPages
+        self.localTitle = localTitle
+        self.onLocalProgress = onLocalProgress
 
         let viewModel = ReaderViewModel()
         viewModel.gid = gid
@@ -185,6 +199,8 @@ struct ImageReaderView: View {
         // 翻页时把新进入预加载窗口的页补进翻译队列（连续翻译模式下）
         .onChange(of: vm.currentPage) { _, page in
             translate.onVisiblePageChanged(gid: vm.gid, currentPage: page, preloaded: vm.cachedImages)
+            // 本地漫画：把进度回调给书库（在线画廊由记录历史负责）
+            onLocalProgress?(page)
         }
         // Apple 端上翻译：configuration 非 nil 时由系统提供 session 执行
         .translationTask(translate.appleBridge.configuration) { session in
@@ -476,20 +492,27 @@ struct ImageReaderView: View {
         let needsLoad = vm.prepareForGallery(targetGid: gid, targetToken: token)
 
         if needsLoad {
-            // Fix D-1, B-1: 从 DownloadManager 查询真实下载状态，替代硬编码 isDownloaded
-            await vm.setupLocalGallery()
+            if let localPages, !localPages.isEmpty {
+                // 本地漫画：页序由导入时定好，直接铺给 ViewModel，
+                // 不走「查下载目录 → 回落网络」那条链路
+                vm.setupLocalPages(localPages)
+                diag("initializeReader: 本地模式 \(localPages.count) 页 \(localTitle ?? "")")
+            } else {
+                // Fix D-1, B-1: 从 DownloadManager 查询真实下载状态，替代硬编码 isDownloaded
+                await vm.setupLocalGallery()
 
-            // Fix Race: setupLocalGallery 完成后再设置 totalPages
-            if pages > 0 {
-                vm.totalPages = pages
-            }
+                // Fix Race: setupLocalGallery 完成后再设置 totalPages
+                if pages > 0 {
+                    vm.totalPages = pages
+                }
 
-            if let ps = previewSet {
-                vm.extractPTokens(from: ps)
-            }
+                if let ps = previewSet {
+                    vm.extractPTokens(from: ps)
+                }
 
-            if vm.totalPages == 0 {
-                await vm.fetchGalleryInfo()
+                if vm.totalPages == 0 {
+                    await vm.fetchGalleryInfo()
+                }
             }
 
             // 获取页数后重算 spreads
