@@ -27,7 +27,17 @@ let package = Package(
             name: "UnrarKit",
             path: ".",
             exclude: [
-                "LICENSE"
+                "LICENSE",
+                // unrar 自带 Windows 专属实现：它们在 iOS/macOS 上没有对应类型
+                "Libraries/unrar/win32acl.cpp",
+                "Libraries/unrar/win32lnk.cpp",
+                "Libraries/unrar/win32stm.cpp",
+                // 非源代码文件，列出来免得 SwiftPM 报 unhandled files
+                "Libraries/unrar/makefile",
+                "Libraries/unrar/readme.txt",
+                "Libraries/unrar/license.txt",
+                "Libraries/unrar/dll.rc",
+                "Libraries/unrar/dll_nocrypt.def"
             ],
             sources: [
                 "Classes",
