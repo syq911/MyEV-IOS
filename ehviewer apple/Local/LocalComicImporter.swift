@@ -194,41 +194,66 @@ final class LocalComicImporter {
 
     // MARK: RAR
 
+    /// RAR / CBR：走 Packages/UnrarKit 暴露的 C 接口（URShim）。
+    ///
+    /// 页序同样要「先排好再抽」——包里常有 `1.jpg / 2.jpg / 10.jpg`，
+    /// 抽到磁盘再排序就晚了（那时文件名已被重命名成页码）。
     private func importRar(at url: URL, sourceName: String, progress: @escaping (Double) -> Void) throws -> LocalComic {
         #if canImport(UnrarKit)
+        guard let archive = url.path.withCString({ URShimOpen($0) }) else {
+            throw LocalComicImportError.archiveFailed("无法打开「\(sourceName)」")
+        }
+        defer { URShimClose(archive) }
+
+        let count = Int(URShimEntryCount(archive))
+        guard count > 0 else {
+            throw LocalComicImportError.archiveFailed(
+                "「\(sourceName)」读取失败（错误码 \(URShimLastError(archive))）"
+            )
+        }
+
+        // 先筛出页并按自然序排好，再逐页抽取
+        var pages: [(index: Int32, name: String)] = []
+        for offset in 0..<count {
+            guard let rawName = URShimEntryName(archive, Int32(offset)) else { continue }
+            let name = String(cString: rawName)
+            guard !LocalComicImportPlan.isJunkPath(name),
+                  LocalComicImportPlan.isImageFileName(name) else { continue }
+            pages.append((Int32(offset), name))
+        }
+        guard !pages.isEmpty else { throw LocalComicImportError.noImages(sourceName) }
+        pages.sort { NaturalSort.isOrderedBefore($0.name, $1.name) }
+
         let comicID = UUID()
         let directory = try storage.makeDirectory(for: comicID)
+        var written = 0
+
         do {
-            let archive = try URKArchive(url: url)
-            let names = try archive.listFilenames()
-            let pages = LocalComicImportPlan.pageFileNames(from: names)
-            guard !pages.isEmpty else { throw LocalComicImportError.noImages(sourceName) }
-
-            var written = 0
-            for (index, name) in pages.enumerated() {
+            for (position, page) in pages.enumerated() {
                 try Task.checkCancellation()
-                let data = try archive.extractData(fromFile: name)
-                let ext = (name as NSString).pathExtension
-                let target = directory.appendingPathComponent(
-                    LocalComicImportPlan.pageFileName(index: index, extension: ext)
-                )
-                try data.write(to: target, options: .atomic)
+                let ext = (page.name as NSString).pathExtension
+                let fileName = LocalComicImportPlan.pageFileName(index: position, extension: ext)
+                let ok = URShimExtractTo(archive, page.index, directory.path, fileName)
+                guard ok else {
+                    throw LocalComicImportError.archiveFailed(
+                        "解压失败：\(page.name)（错误码 \(URShimLastError(archive))）"
+                    )
+                }
                 written += 1
-                progress(Double(index + 1) / Double(pages.count))
+                progress(Double(position + 1) / Double(pages.count))
             }
-
-            guard written > 0 else { throw LocalComicImportError.noImages(sourceName) }
-            return LocalComic(
-                id: comicID,
-                title: LocalComicImportPlan.title(fromSourceName: sourceName),
-                pageCount: written,
-                sourceKind: .rar,
-                sourceName: sourceName
-            )
         } catch {
             try? fileManager.removeItem(at: directory)
             throw error
         }
+
+        return LocalComic(
+            id: comicID,
+            title: LocalComicImportPlan.title(fromSourceName: sourceName),
+            pageCount: written,
+            sourceKind: .rar,
+            sourceName: sourceName
+        )
         #else
         throw LocalComicImportError.unsupportedArchive(sourceName)
         #endif
