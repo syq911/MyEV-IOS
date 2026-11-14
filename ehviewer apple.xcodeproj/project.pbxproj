@@ -223,6 +223,7 @@
 				DC4A08172F3DA31000717C38 /* EhParser */,
 				DC4A08182F3DA31000717C38 /* EhSpider */,
 				DC4A08192F3DA31000717C38 /* EhDownload */,
+				DCA0C4102F4A000100000002 /* UnrarKit */,
 			);
 			productName = "ehviewer apple";
 			productReference = DC4A07682F3DA21800717C38 /* ehviewer apple.app */;
@@ -336,6 +337,7 @@
 				DC4A08042F3DA30000717C38 /* XCLocalSwiftPackageReference "Packages/EhSpider" */,
 				DC4A08052F3DA30000717C38 /* XCLocalSwiftPackageReference "Packages/EhDownload" */,
 				DC4A08062F3DA30000717C38 /* XCLocalSwiftPackageReference "Packages/EhUI" */,
+				DCA0C4102F4A000100000001 /* XCLocalSwiftPackageReference "Packages/UnrarKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = DC4A07692F3DA21800717C38 /* Products */;
@@ -879,6 +881,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/EhUI;
 		};
+		DCA0C4102F4A000100000001 /* XCLocalSwiftPackageReference "Packages/UnrarKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/UnrarKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -926,6 +932,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DC4A08052F3DA30000717C38 /* XCLocalSwiftPackageReference "Packages/EhDownload" */;
 			productName = EhDownload;
+		};
+		DCA0C4102F4A000100000002 /* UnrarKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DCA0C4102F4A000100000001 /* XCLocalSwiftPackageReference "Packages/UnrarKit" */;
+			productName = UnrarKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

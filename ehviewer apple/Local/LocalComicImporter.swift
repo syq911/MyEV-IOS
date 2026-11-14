@@ -20,6 +20,9 @@
 
 import Foundation
 import EhModels
+#if canImport(UnrarKit)
+import UnrarKit
+#endif
 
 // MARK: - 错误
 
