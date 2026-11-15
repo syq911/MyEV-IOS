@@ -126,6 +126,10 @@ final class LocalComicsModel {
         storage.pageURLs(for: comic)
     }
 
+    func pageMap(for comic: LocalComic) -> [Int: URL] {
+        storage.pageMap(for: comic)
+    }
+
     func coverURL(for comic: LocalComic) -> URL? {
         storage.pageURLs(for: comic).first
     }
@@ -214,7 +218,25 @@ struct LocalComicsView: View {
     @State private var model = LocalComicsModel()
     @State private var showImporter = false
     @State private var readingComic: LocalComic?
-    @State private var pendingDelete: LocalComic?
+    /// 当前待确认的操作（删除 / 翻译）。用枚举而不是两个布尔：
+    /// 同一视图上多个 confirmationDialog 只有最后一个生效。
+    @State private var pendingPrompt: LocalComicPrompt?
+    /// 磁盘统计出的「已翻译页数」（由 .task 一次性载入；会话内运行中的任务优先用实时值）
+    @State private var translatedPages: [UUID: Int] = [:]
+    @State private var actionMessage: String?
+
+    private enum LocalComicPrompt {
+        case delete(LocalComic)
+        case translate(LocalComic)
+    }
+
+    private var promptTitle: String {
+        guard let prompt = pendingPrompt else { return "" }
+        switch prompt {
+        case .delete: return LocalComicText.deleteTitle
+        case .translate: return LocalComicText.translateTitle
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -262,22 +284,49 @@ struct LocalComicsView: View {
             } message: {
                 Text(model.importError ?? "")
             }
-            .confirmationDialog(
-                LocalComicText.deleteTitle,
-                isPresented: Binding(
-                    get: { pendingDelete != nil },
-                    set: { if !$0 { pendingDelete = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("删除", role: .destructive) {
-                    if let comic = pendingDelete { model.delete(comic) }
-                    pendingDelete = nil
-                }
-                Button("取消", role: .cancel) { pendingDelete = nil }
+            .alert("无法翻译", isPresented: Binding(
+                get: { actionMessage != nil },
+                set: { if !$0 { actionMessage = nil } }
+            )) {
+                Button("好") { actionMessage = nil }
             } message: {
-                Text(LocalComicText.deleteMessage)
+                Text(actionMessage ?? "")
             }
+            // 删除与翻译共用**同一个** confirmationDialog。
+            // 两个 .confirmationDialog 挂在同一视图上时，真机上只会有一个生效
+            // （表现为「点删除没反应」），所以用 presenting: 传具体意图。
+            .confirmationDialog(
+                promptTitle,
+                isPresented: Binding(
+                    get: { pendingPrompt != nil },
+                    set: { if !$0 { pendingPrompt = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingPrompt
+            ) { prompt in
+                switch prompt {
+                case .delete(let comic):
+                    Button("删除", role: .destructive) {
+                        model.delete(comic)
+                        pendingPrompt = nil
+                    }
+                    Button("取消", role: .cancel) { pendingPrompt = nil }
+                case .translate(let comic):
+                    Button(LocalComicText.translateConfirm) {
+                        startTranslate(comic)
+                        pendingPrompt = nil
+                    }
+                    Button("取消", role: .cancel) { pendingPrompt = nil }
+                }
+            } message: { prompt in
+                switch prompt {
+                case .delete:
+                    Text(LocalComicText.deleteMessage)
+                case .translate(let comic):
+                    Text(translateMessage(for: comic))
+                }
+            }
+            .task { await refreshTranslatedPages() }
             .overlay {
                 if model.isImporting { importingOverlay }
             }
@@ -305,11 +354,53 @@ struct LocalComicsView: View {
                     row(comic)
                 }
                 .buttonStyle(.plain)
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                .contextMenu {
+                    Button {
+                        readingComic = comic
+                    } label: {
+                        Label("开始阅读", systemImage: "book")
+                    }
+
+                    if MangaTranslationBatch.shared.isRunning(gid: comic.readerIdentity) {
+                        Button(role: .destructive) {
+                            MangaTranslationBatch.shared.cancel(gid: comic.readerIdentity)
+                        } label: {
+                            Label("停止翻译", systemImage: "stop.circle")
+                        }
+                    } else {
+                        Button {
+                            pendingPrompt = .translate(comic)
+                        } label: {
+                            Label("一键翻译整本", systemImage: "character.book.closed")
+                        }
+                    }
+
                     Button(role: .destructive) {
-                        pendingDelete = comic
+                        pendingPrompt = .delete(comic)
                     } label: {
                         Label("删除", systemImage: "trash")
+                    }
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        pendingPrompt = .delete(comic)
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                    if MangaTranslationBatch.shared.isRunning(gid: comic.readerIdentity) {
+                        Button {
+                            MangaTranslationBatch.shared.cancel(gid: comic.readerIdentity)
+                        } label: {
+                            Label("停止", systemImage: "stop.circle")
+                        }
+                        .tint(.orange)
+                    } else {
+                        Button {
+                            pendingPrompt = .translate(comic)
+                        } label: {
+                            Label("翻译", systemImage: "character.book.closed")
+                        }
+                        .tint(.blue)
                     }
                 }
             }
@@ -336,12 +427,88 @@ struct LocalComicsView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+
+                if let text = translationText(for: comic) {
+                    Text(text)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+    }
+
+    // MARK: 一键翻译
+
+    /// 行内的翻译状态：运行中的任务优先（实时），否则用开屏时统计出的磁盘结果。
+    private func translationText(for comic: LocalComic) -> String? {
+        if let job = MangaTranslationBatch.shared.job(gid: comic.readerIdentity) {
+            switch job.phase {
+            case .running:
+                return job.total > 0
+                    ? LocalComicText.translating(done: job.done, total: job.total)
+                    : LocalComicText.translatePreparing
+            case .finished:
+                return LocalComicText.translated(done: job.done, total: job.total)
+            case .cancelled:
+                return LocalComicText.translateStopped(done: job.done, total: job.total)
+            }
+        }
+        if let done = translatedPages[comic.id], done > 0 {
+            return LocalComicText.translated(done: done, total: comic.pageCount)
+        }
+        return nil
+    }
+
+    private func translateMessage(for comic: LocalComic?) -> String {
+        // 费用说明必须跟着翻译服务走：DeepSeek 走用户自己的 Key（按量计费），
+        // Apple 端上翻译不联网也不产生费用。写死一句「会消耗额度」是错的提示。
+        let note: String
+        switch MangaTranslationSettings.shared.provider {
+        case .deepSeek:
+            note = "使用你自己的 DeepSeek API Key，费用由该服务商按用量计费。"
+        case .appleOnDevice:
+            note = "使用系统端上翻译，不联网、不产生费用。"
+        }
+        return LocalComicText.translateMessage(pages: comic?.pageCount ?? 0, note: note)
+    }
+
+    private func startTranslate(_ comic: LocalComic) {
+        guard MangaTranslationSettings.shared.enabled else {
+            actionMessage = LocalComicText.translateDisabled
+            return
+        }
+        let urls = model.pageURLs(for: comic)
+        guard !urls.isEmpty else { return }
+
+        // 阅读器里页码是 0-based，缓存也按 0-based 存；这里必须用同一套编号，
+        // 否则「列表里翻过」和「阅读器里翻过」会被当成两组不同的页重复计费。
+        MangaTranslationBatch.shared.start(gid: comic.readerIdentity, pageURLs: model.pageMap(for: comic))
+    }
+
+    /// 开屏时统计每本书已翻译多少页（只读目录里缓存的 json 数量，代价很小）。
+    private func refreshTranslatedPages() async {
+        let comics = model.sortedComics
+        guard !comics.isEmpty else {
+            translatedPages = [:]
+            return
+        }
+        let cache = MangaTranslationCache.shared
+        let signature = MangaTranslationPipeline.translationSignature(MangaTranslationSettings.shared)
+        let pairs = comics.map { (id: $0.id, gid: $0.readerIdentity) }
+
+        let counts = await Task.detached(priority: .utility) { () -> [UUID: Int] in
+            var out: [UUID: Int] = [:]
+            for pair in pairs {
+                out[pair.id] = cache.translatedPages(gid: pair.gid, signature: signature).count
+            }
+            return out
+        }.value
+
+        translatedPages = counts
     }
 
     private var emptyState: some View {

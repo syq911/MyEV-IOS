@@ -65,24 +65,39 @@ final class MangaTranslationBatch {
 
     /// 从磁盘统计：已下载的页里，有多少页已经翻过（含无文字的页）
     func diskSummary(gid: Int64) async -> (done: Int, total: Int) {
-        let signature = MangaTranslationPipeline.translationSignature(MangaTranslationSettings.shared)
         guard let dir = await DownloadManager.shared.localGalleryDirectory(gid: gid) else { return (0, 0) }
-        let pages = ReaderViewModel.scanLocalImageURLs(in: dir).keys
-        guard !pages.isEmpty else { return (0, 0) }
+        return diskSummary(gid: gid, pageURLs: ReaderViewModel.scanLocalImageURLs(in: dir))
+    }
+
+    /// 本地漫画：目录不归 DownloadManager 管，页由调用方给
+    func diskSummary(gid: Int64, pageURLs: [Int: URL]) -> (done: Int, total: Int) {
+        guard !pageURLs.isEmpty else { return (0, 0) }
+        let signature = MangaTranslationPipeline.translationSignature(MangaTranslationSettings.shared)
         let doneSet = MangaTranslationCache.shared.translatedPages(gid: gid, signature: signature)
-        let done = pages.filter { doneSet.contains($0) }.count
-        return (done, pages.count)
+        let done = pageURLs.keys.filter { doneSet.contains($0) }.count
+        return (done, pageURLs.count)
     }
 
     // MARK: - 开始 / 取消
 
+    /// 下载画廊：页从下载目录取
     func start(gid: Int64) {
+        start(gid: gid, pageURLs: nil)
+    }
+
+    /// 本地漫画：没有 DownloadManager 里的 gid 目录，页必须由调用方直接给。
+    ///
+    /// 之所以做成显式传入而不是再加一个「去某处找目录」的分支：
+    /// 本地漫画的身份是**负数伪 gid**（由 UUID 派生），DownloadManager 里查不到它，
+    /// 而猜路径（例如复用下载目录命名规则）会在将来改动存储布局时静默失效。
+    /// 传进来的页本来就是调用方从自己的存储里读出来的唯一真相。
+    func start(gid: Int64, pageURLs: [Int: URL]?) {
         guard tasks[gid] == nil else { return }
         jobs[gid] = Job(total: 0, done: 0, failed: 0, phase: .running)
         beginBackgroundAssertion()
         let signature = MangaTranslationPipeline.translationSignature(MangaTranslationSettings.shared)
         tasks[gid] = Task { [weak self] in
-            await self?.run(gid: gid, signature: signature)
+            await self?.run(gid: gid, signature: signature, pageURLs: pageURLs)
         }
     }
 
@@ -103,7 +118,7 @@ final class MangaTranslationBatch {
 
     // MARK: - 执行
 
-    private func run(gid: Int64, signature: String) async {
+    private func run(gid: Int64, signature: String, pageURLs: [Int: URL]?) async {
         defer {
             tasks[gid] = nil
             endBackgroundAssertionIfIdle()
@@ -117,12 +132,17 @@ final class MangaTranslationBatch {
             return
         }
 
-        // 1) 只翻已经下载到本地的页
-        guard let dir = await DownloadManager.shared.localGalleryDirectory(gid: gid) else {
-            jobs[gid] = Job(total: 0, done: 0, failed: 0, phase: .finished)
-            return
+        // 1) 页来源：下载画廊查下载目录；本地漫画由调用方直接给
+        let urls: [Int: URL]
+        if let pageURLs {
+            urls = pageURLs
+        } else {
+            guard let dir = await DownloadManager.shared.localGalleryDirectory(gid: gid) else {
+                jobs[gid] = Job(total: 0, done: 0, failed: 0, phase: .finished)
+                return
+            }
+            urls = ReaderViewModel.scanLocalImageURLs(in: dir)
         }
-        let urls = ReaderViewModel.scanLocalImageURLs(in: dir)
         let pages = urls.keys.sorted()
         guard !pages.isEmpty else {
             jobs[gid] = Job(total: 0, done: 0, failed: 0, phase: .finished)

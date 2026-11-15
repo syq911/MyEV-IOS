@@ -252,6 +252,24 @@ struct LocalComicStorageTests {
         #expect(urls.map(\.lastPathComponent) == ["00000001.jpg", "00000002.jpg", "00000010.jpg"])
     }
 
+    @Test func pageMapIsZeroBasedInFileOrder() throws {
+        let storage = try makeStorage()
+        defer { try? FileManager.default.removeItem(at: storage.root) }
+
+        let comic = LocalComic(title: "映射", pageCount: 3, sourceKind: .zip, sourceName: "映射")
+        let dir = try storage.makeDirectory(for: comic.id)
+        for name in ["00000010.jpg", "00000002.jpg", "00000001.jpg"] {
+            try Data("x".utf8).write(to: dir.appendingPathComponent(name))
+        }
+
+        let map = storage.pageMap(for: comic)
+        // 页码必须从 0 开始、连续、且与文件自然序一一对应
+        #expect(map.keys.sorted() == [0, 1, 2])
+        #expect(map[0]?.lastPathComponent == "00000001.jpg")
+        #expect(map[1]?.lastPathComponent == "00000002.jpg")
+        #expect(map[2]?.lastPathComponent == "00000010.jpg")
+    }
+
     @Test func removesComicDirectory() throws {
         let storage = try makeStorage()
         defer { try? FileManager.default.removeItem(at: storage.root) }

@@ -92,6 +92,23 @@ enum LocalComicText {
     static let importing = "正在导入…"
     static let deleteTitle = "删除本地漫画？"
     static let deleteMessage = "会同时删除 App 内的副本文件，原始文件不受影响。"
+
+    // MARK: 一键翻译
+
+    static let translatePreparing = "准备翻译…"
+    static func translating(done: Int, total: Int) -> String { "翻译中 \(done) / \(total)" }
+    static func translated(done: Int, total: Int) -> String { "已翻译 \(done) / \(total)" }
+    static func translateStopped(done: Int, total: Int) -> String {
+        "翻译已停止（\(done) / \(total)）"
+    }
+    static let translateTitle = "一键翻译整本？"
+    static let translateConfirm = "开始翻译"
+    static let translateDisabled = "翻译功能当前是关闭的。请到「设置 → 漫画翻译」打开并配置后重试。"
+
+    /// 说明文案：页码是变量，费用说明随翻译服务变化 —— 两者都不能写死在一处。
+    static func translateMessage(pages: Int, note: String) -> String {
+        "将逐页识别并翻译 \(pages) 页里的文字，译文会缓存到本地，进阅读器直接显示。\n\(note)"
+    }
 }
 
 // MARK: - 排序
@@ -248,6 +265,19 @@ final class LocalComicStorage {
     /// 页文件列表（已按自然序）
     func pageURLs(for comic: LocalComic) -> [URL] {
         pageURLs(in: directory(for: comic))
+    }
+
+    /// 页码 → 文件（0-based，顺序即 `pageURLs` 的顺序）。
+    ///
+    /// 阅读器和翻译缓存都以 0-based 页码为键，所以「列表里一键翻译」拼出来的映射
+    /// 必须与阅读器翻页时用的是同一套编号。拼错了不会崩，只会把译文贴到别的页上
+    /// （而且按页计费），所以单独抽出来给测试钉住。
+    func pageMap(for comic: LocalComic) -> [Int: URL] {
+        var map: [Int: URL] = [:]
+        for (index, url) in pageURLs(for: comic).enumerated() {
+            map[index] = url
+        }
+        return map
     }
 
     func pageURLs(in directory: URL) -> [URL] {
