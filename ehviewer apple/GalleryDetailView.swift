@@ -554,7 +554,8 @@ struct GalleryDetailView: View {
 
     private var tagSection: some View {
         let showTranslations = AppSettings.shared.showTagTranslations
-        let tagDb = EhTagDatabase.shared
+        // 翻译表在进页面时算好，body 只查字典 —— 见 refreshTagTranslations
+        let tagTranslations = vm.tagTranslations
 
         return VStack(alignment: .leading, spacing: 8) {
             Text("标签")
@@ -567,7 +568,7 @@ struct GalleryDetailView: View {
                     // 翻译 namespace (对齐 Android: ehTags.getTranslation("n:" + groupName))
                     // 注意：Android使用 "n:" 前缀表示rows命名空间的翻译
                     let nsKey = "rows:\(group.groupName)"
-                    let nsTranslation = showTranslations ? tagDb.getTranslation(nsKey) : nil
+                    let nsTranslation = showTranslations ? tagTranslations[nsKey] : nil
                     Text(nsTranslation ?? group.groupName)
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
@@ -577,7 +578,7 @@ struct GalleryDetailView: View {
                         ForEach(group.tags, id: \.self) { tag in
                             // 翻译 tag (对齐 Android: ehTags.getTranslation(namespace:tag))
                             let fullTag = "\(group.groupName):\(tag)"
-                            let tagTranslation = showTranslations ? tagDb.getTranslation(fullTag) : nil
+                            let tagTranslation = showTranslations ? tagTranslations[fullTag] : nil
                             // 对齐 Android: onTagClick → 推入新画廊列表到左侧导航栈
                             tagButton(label: tagTranslation ?? tag, fullTag: fullTag)
                         }
@@ -892,7 +893,7 @@ class GalleryDetailViewModel {
     // MARK: - Processed Comment (Perf P0-4)
 
     /// 预处理后的评论结构体 — 在 loadDetail 成功后后台计算
-    struct ProcessedComment: Identifiable {
+    struct ProcessedComment: Identifiable, Sendable {
         let id: Int64
         let user: String
         let time: Date
@@ -907,7 +908,7 @@ class GalleryDetailViewModel {
     }()
 
     /// 从 HTML 中剥离标签 — 使用预编译正则
-    private static func stripHTML(_ html: String) -> String {
+    nonisolated private static func stripHTML(_ html: String) -> String {
         guard let regex = htmlTagRegex else {
             return html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         }
@@ -965,7 +966,8 @@ class GalleryDetailViewModel {
             self.downloadState = dlState
             self.isLoading = false
             // Perf P0-4: 预处理评论 HTML
-            preprocessComments(cached.comments.comments)
+            refreshTagTranslations(cached.tags)
+            await preprocessComments(cached.comments.comments)
             // Perf P0-5: 一次性检查阅读进度
             checkReadingProgress(gid: gid)
             debugLog("Loaded from cache - Comments: \(cached.comments.comments.count), HasMore: \(cached.comments.hasMore)")
@@ -1002,7 +1004,8 @@ class GalleryDetailViewModel {
             self.isLoading = false
 
             // Perf P0-4: 预处理评论 HTML
-            preprocessComments(result.comments.comments)
+            refreshTagTranslations(result.tags)
+            await preprocessComments(result.comments.comments)
             // Perf P0-5: 一次性检查阅读进度
             checkReadingProgress(gid: gid)
 
@@ -1047,18 +1050,59 @@ class GalleryDetailViewModel {
 
     // MARK: - Perf P0-4: 预处理评论 HTML
 
-    /// 在 loadDetail 成功后调用 — 后台剥离 HTML 标签，View body 直接读取纯文本
-    func preprocessComments(_ rawComments: [GalleryComment]) {
-        processedComments = rawComments.map { comment in
-            ProcessedComment(
-                id: comment.id,
-                user: comment.user,
-                time: comment.time,
-                score: comment.score,
-                strippedBody: Self.stripHTML(comment.comment),
-                attributedBody: CommentHTML.attributed(comment.comment)
-            )
+    /// 标签译文表（key 与 body 里一致：`rows:<namespace>` / `<namespace>:<tag>`）
+    ///
+    /// 为什么要预计算：`EhTagDatabase.getTranslation` 内部是一次 `queue.sync`。
+    /// 放在 body 里等于「每个标签、每次重绘都抢一次锁」—— 详情页有几十个标签，
+    /// 而重绘会因为下载轮询等状态变化反复触发，这就是进详情页发卡的一个重要来源。
+    private(set) var tagTranslations: [String: String] = [:]
+
+    /// 进详情页时算一次标签译文；关掉标签翻译就清空
+    func refreshTagTranslations(_ groups: [GalleryTagGroup]) {
+        guard AppSettings.shared.showTagTranslations, !groups.isEmpty else {
+            tagTranslations = [:]
+            return
         }
+        let db = EhTagDatabase.shared
+        var map: [String: String] = [:]
+        for group in groups {
+            let nsKey = "rows://(group.groupName)"
+            if let translation = db.getTranslation(nsKey) {
+                map[nsKey] = translation
+            }
+            for tag in group.tags {
+                let fullTag = "\(group.groupName):\(tag)"
+                if let translation = db.getTranslation(fullTag) {
+                    map[fullTag] = translation
+                }
+            }
+        }
+        tagTranslations = map
+    }
+
+    /// 在 loadDetail 成功后调用 — 剥离 HTML 并解析富文本。
+    ///
+    /// ⚠️ 必须离开主线程：`stripHTML` 是正则、`CommentHTML.attributed` 是 HTML 解析，
+    /// 评论多的时候在主线程跑就是「点进详情页卡住」的直接原因（进缓存时尤其明显，
+    /// 因为它是在点击的那一帧同步执行的）。
+    func preprocessComments(_ rawComments: [GalleryComment]) async {
+        guard !rawComments.isEmpty else {
+            processedComments = []
+            return
+        }
+        let processed = await Task.detached(priority: .userInitiated) {
+            rawComments.map { comment in
+                ProcessedComment(
+                    id: comment.id,
+                    user: comment.user,
+                    time: comment.time,
+                    score: comment.score,
+                    strippedBody: Self.stripHTML(comment.comment),
+                    attributedBody: CommentHTML.attributed(comment.comment)
+                )
+            }
+        }.value
+        processedComments = processed
     }
 
     // MARK: - Perf P0-5: 一次性检查阅读进度

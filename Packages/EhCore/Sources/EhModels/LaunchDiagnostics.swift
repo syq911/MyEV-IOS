@@ -104,20 +104,33 @@ public final class LaunchDiagnostics: @unchecked Sendable {
         mark("======== LAUNCH[\(context)] v\(version)(\(build)) \(bundleID) · \(osVersion) · 内存\(memMB)MB ========")
     }
 
-    /// 记录一个断点 —— 同步写入并 flush，保证崩溃前最后一条一定落盘
+    /// 记录一个断点。
+    ///
+    /// ⚠️ 这里**不做** `synchronize()`（fsync）。
+    /// 早先每条都 fsync，看似更安全，实际代价极大：翻页/翻译路径上每页要打十几条，
+    /// 一本 1500 页的漫画就是上万次 fsync —— 磁盘 IO 抖到卡顿、发热，收益却是零。
+    /// 说明：`write()` 已经把数据交给内核页缓存，进程**崩溃**（含 SIGKILL）后内容仍在文件里；
+    /// fsync 只对「断电 / 内核崩溃」有意义，那不是我们要诊断的场景。
+    /// 真到需要落盘时由 `flush()` 统一处理（切后台、退出阅读器等低频时机）。
     public func mark(_ text: String) {
         lock.lock()
         step += 1
         let line = "[\(stampFormatter.string(from: Date()))] #\(step) \(Thread.isMainThread ? "M" : "B") \(text)\n"
         if let data = line.data(using: .utf8) {
             handle?.write(data)
-            try? handle?.synchronize()
         }
         lock.unlock()
 
         #if canImport(os)
         diagOSLog.info("\(text, privacy: .public)")
         #endif
+    }
+
+    /// 把内核缓冲刷到磁盘 —— 只在低频时机调用（进入后台、退出阅读器等）
+    public func flush() {
+        lock.lock()
+        try? handle?.synchronize()
+        lock.unlock()
     }
 
     /// 日志文件路径（便于提示用户去哪里取）

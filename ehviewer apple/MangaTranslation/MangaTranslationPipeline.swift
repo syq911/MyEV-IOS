@@ -30,15 +30,16 @@ enum MangaTranslationOutcome: Sendable {
     }
 }
 
-// MARK: - OCR 并发闸门
+// MARK: - 并发闸门
 
-/// Vision OCR 的并发闸门。
+/// 通用的「最多 N 路」并发闸门。
 ///
-/// 为什么不直接把整页并发降下来：一页的耗时大头是**翻译请求的往返**（1–4 秒），
-/// OCR 只占几百毫秒。把 OCR 卡在 2 路、其余页并行等网络，既避开 Vision 的并行死锁
-/// （>2 路会卡死，历史上踩过），又能把吞吐拉起来。
-actor VisionOCRLimiter {
-    static let shared = VisionOCRLimiter(limit: 2)
+/// 为什么需要它：一页的耗时大头是**翻译请求的往返**（1–4 秒），而 OCR 与排版是纯 CPU。
+/// 把 CPU 环节卡在 2 路、其余页并行等网络，既避开 Vision 的并行死锁（>2 路会卡死，
+/// 历史上踩过），也不会让 6 页同时排版把机器烧烫。
+actor ConcurrencyGate {
+    static let visionOCR = ConcurrencyGate(limit: 2)
+    static let typesetRender = ConcurrencyGate(limit: 2)
 
     private let limit: Int
     private var active = 0
@@ -91,14 +92,14 @@ enum MangaTranslationPipeline {
         }
         let languages = settings.sourceLanguage.visionLanguages
         let useFallback = settings.usesLineDropFallback
-        // OCR 走闸门（最多 2 路），翻译请求不受限 —— 见 VisionOCRLimiter 的注释
-        await VisionOCRLimiter.shared.acquire()
+        // OCR 走闸门（最多 2 路），翻译请求不受限 —— 见 ConcurrencyGate 的注释
+        await ConcurrencyGate.visionOCR.acquire()
         let ocrResult = await Task.detached(priority: .userInitiated) {
             var recognizer = VisionTextRecognizer(languages: languages)
             recognizer.usesLineDropFallback = useFallback
             return try await recognizer.recognize(in: cgImage)
         }.result
-        await VisionOCRLimiter.shared.release()
+        await ConcurrencyGate.visionOCR.release()
 
         let lines: [MangaTextLine] = try ocrResult.get()
         try Task.checkCancellation()

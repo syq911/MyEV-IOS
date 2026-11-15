@@ -37,7 +37,11 @@ final class MangaTranslationController {
     /// 最近一次失败信息（点击后消除）
     private(set) var failureMessage: String?
 
-    /// 译文渲染版本号：每渲染完一页 +1。
+    /// 当前可见页（由 onVisiblePageChanged 维护）。
+    /// 渲染完成时只有「这一页」才需要立刻重绘 —— 见 renderVersion。
+    private var visiblePage: Int?
+
+    /// 译文渲染版本号：**当前可见页**渲染完时 +1。
     ///
     /// 存在的唯一原因：`images` 里装的是整页大图，刻意标了 `@ObservationIgnored`
     /// （否则每次写入都会让阅读器整页重算），但这样 SwiftUI 就**不知道**「某页的译文
@@ -78,7 +82,7 @@ final class MangaTranslationController {
     /// 并行度。
     ///
     /// - DeepSeek：一页的耗时几乎全在网络往返（1–4 秒），可以多路并行。
-    ///   OCR 另有 2 路闸门（`VisionOCRLimiter`），所以不会把 Vision 压死。
+    ///   OCR 另有 2 路闸门（`ConcurrencyGate.visionOCR`），所以不会把 Vision 压死。
     /// - Apple 端上翻译：桥只支持单会话，只能 1。
     private var maxConcurrent: Int {
         switch MangaTranslationSettings.shared.provider {
@@ -154,6 +158,7 @@ final class MangaTranslationController {
     // MARK: - 翻页：补齐队列
 
     func onVisiblePageChanged(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
+        visiblePage = currentPage
         guard autoTranslate else { return }
         // 丢掉已经翻过去的页：既清队列，也**取消**还在跑的，
         // 否则 2 个并行槽位会被你已经翻过的页占着，当前页只能干等。
@@ -209,6 +214,7 @@ final class MangaTranslationController {
     ///
     /// 幂等：已有译文 / 正在处理 / 图还没解码，都直接返回。
     func prioritizeVisible(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
+        visiblePage = currentPage
         guard autoTranslate, visible else { return }
         let k = key(gid: gid, page: currentPage)
         guard images[k] == nil, !running.contains(k) else { return }
@@ -222,12 +228,19 @@ final class MangaTranslationController {
     }
 
     /// 把预加载窗口里的页按「离当前页由近到远」入队（当前页优先）
+    /// 一次最多排多少页去翻译。
+    ///
+    /// 这是**花钱**的闸门：翻译逐页调用接口。整本加载模式下 `preloaded` 可能有几百页，
+    /// 若全塞进队列就是几百个请求 —— 既烧钱又发烫，而用户几分钟内根本看不到那么远。
+    /// 只排最近的一段，翻过去时再由 prioritizeVisible/enqueuePreloaded 补上。
+    private static let maxEnqueueWindow = 30
+
     private func enqueuePreloaded(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
         let pages = preloaded.keys.sorted {
             abs($0 - currentPage) == abs($1 - currentPage)
                 ? $0 < $1
                 : abs($0 - currentPage) < abs($1 - currentPage)
-        }
+        }.prefix(Self.maxEnqueueWindow)
         for page in pages {
             guard let image = preloaded[page] else { continue }
             enqueue(gid: gid, page: page, image: image)
@@ -317,14 +330,21 @@ final class MangaTranslationController {
                 fontScale: CGFloat(settings.fontScale)
             )
             let sourceImage = job.image
+            // 排版是纯 CPU：走 2 路闸门，避免 6 页同时绘制把机器烧烫
+            await ConcurrencyGate.typesetRender.acquire()
             let rendered = await Task.detached(priority: .userInitiated) {
                 MangaTypesetter.render(original: sourceImage, lines: translated, options: options)
             }.value
+            await ConcurrencyGate.typesetRender.release()
             try Task.checkCancellation()
             images[k] = rendered
             renderedSignature[k] = renderSig
-            // 通知 SwiftUI「这页有译文了」（大图本身不参与观察，见 renderVersion 注释）
-            renderVersion &+= 1
+            // 只有「用户正在看的那一页」渲染完才需要立刻重绘。
+            // 提前预渲染的页不需要 —— 翻过去时 body 本来就会重算；
+            // 每页都 bump 会让整个阅读器（含几千项 ForEach）反复重算，纯属白烧 CPU。
+            if job.page == visiblePage {
+                renderVersion &+= 1
+            }
             if autoTranslate { visible = true }
             diag("MangaTr: 页完成 gid=\(job.gid) page=\(job.page) 行=\(translated.count) 命中缓存=\(cacheHit ? 1 : 0)")
         } catch is CancellationError {

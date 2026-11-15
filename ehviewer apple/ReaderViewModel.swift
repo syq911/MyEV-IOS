@@ -226,7 +226,37 @@ class ReaderViewModel {
     /// cachedImages 这层的常驻解码字节上限 —— NSCache 的 costLimit 只能约束缓存自身，
     /// 管不住 Observable 字典持有的引用。长条漫单页降采样后仍可达 40MB，
     /// 20 页窗口叠起来足以触发 Jetsam (1.4.1 计划 P2-C)。
-    nonisolated private static let retainedCostLimit = 350 * 1024 * 1024
+    nonisolated private static let defaultRetainedCostLimit = 350 * 1024 * 1024
+
+    /// 「整本加载」的文件体积门槛：本地漫画文件总量 ≤ 500MB 时，一次性把整本铺进内存。
+    /// 用户诉求原文：「小于 500MB 的直接整个加载进来，减少 IO 操作，内存很多」。
+    nonisolated static let wholeComicFileBudget = 500 * 1024 * 1024
+
+    /// 是否处于「整本加载」模式。
+    ///
+    /// 这不是无条件铺满：真正的约束是 `retainedCostLimit`（解码后字节），
+    /// 文件小 ≠ 解码后也小（JPEG 解码后可能是文件的十几倍）。
+    /// 所以两个条件同时成立才铺：文件 ≤ 500MB 且解码字节没到上限。
+    private(set) var loadsEntireComic = false
+
+    /// 本地页文件总量（探测时超过门槛就提前停在门槛之上，不必精确）
+    private(set) var totalLocalFileBytes = 0
+
+    /// 常驻解码字节上限：整本模式按物理内存放宽（1/4，最多 2.5GB）。
+    private var retainedCostLimit: Int {
+        guard loadsEntireComic else { return Self.defaultRetainedCostLimit }
+        let quarter = Int(ProcessInfo.processInfo.physicalMemory / 4)
+        return min(max(Self.defaultRetainedCostLimit, quarter), 2_500 * 1024 * 1024)
+    }
+
+    /// 当前常驻解码字节（用于判断「还塞不塞得下」）
+    private var retainedDecodedBytes: Int {
+        var total = 0
+        for image in cachedImages.values {
+            total += Self.decodedCost(of: image)
+        }
+        return total
+    }
 
     /// 降采样解码: 用 ImageIO 在解码阶段限制像素尺寸，而非先全量解码再缩放
     /// 一张 15000×20000 JPEG 全量解码 = 1.2GB; 降采样到 4096px 宽 ≈ 40MB
@@ -552,7 +582,7 @@ class ReaderViewModel {
         for image in cachedImages.values {
             total += Self.decodedCost(of: image)
         }
-        guard total > Self.retainedCostLimit else { return }
+        guard total > retainedCostLimit else { return }
 
         let lower = max(0, page - 2)
         let upper = min(max(lower, totalPages - 1), page + 2)
@@ -561,7 +591,7 @@ class ReaderViewModel {
         // ★ 必须先物化成数组再删：边遍历 keys 视图边改字典是未定义行为
         //   （搜索触底闪退就是同类问题，见 PaginationAndSearchTests）
         for p in cachedImages.keys.sorted(by: { abs($0 - page) > abs($1 - page) }) {
-            if total <= Self.retainedCostLimit { break }
+            if total <= retainedCostLimit { break }
             guard !protectedPages.contains(p), let image = cachedImages[p] else { continue }
             total -= Self.decodedCost(of: image)
             cachedImages.removeValue(forKey: p)
@@ -675,6 +705,10 @@ class ReaderViewModel {
         // 目录枚举一次，建立页码 → 文件 URL 映射（1.4.1 计划 P2-D）
         self.localFileURLs = dir.map { Self.scanLocalImageURLs(in: $0) } ?? [:]
         diag("setupLocalGallery: 完成 isDownloaded=\(isDownloaded) 本地页数=\(localFileURLs.count)")
+        if !localFileURLs.isEmpty {
+            let urls = localFileURLs.keys.sorted().compactMap { localFileURLs[$0] }
+            probeLocalFileBudget(urls)
+        }
     }
 
     /// 本地漫画：页面来自一组**已排好序**的文件，和下载目录无关
@@ -692,6 +726,49 @@ class ReaderViewModel {
         isDownloaded = true
         totalPages = urls.count
         diag("setupLocalPages: \(urls.count) 页")
+        probeLocalFileBudget(urls)
+    }
+
+    /// 探测本地页文件总量，决定要不要「整本加载」。
+    ///
+    /// 放到后台做：1554 个文件的 stat 不能压在主线程上（那就是「进阅读器卡一下」）。
+    /// 超出门槛立刻停 —— 结论都一样是「不整本加载」，没必要数完。
+    private func probeLocalFileBudget(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let snapshot = urls
+        Task { [weak self] in
+            let bytes = await Task.detached(priority: .utility) {
+                var total = 0
+                for url in snapshot {
+                    total += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if total > Self.wholeComicFileBudget { break }
+                }
+                return total
+            }.value
+            guard let self else { return }
+            self.applyLocalFileBudget(bytes)
+        }
+    }
+
+    /// 是否应当整本加载 —— 纯函数，边界由单元测试钉住
+    /// （0 表示探测失败/空目录，不该触发整本加载）。
+    nonisolated static func shouldLoadEntireComic(fileBytes: Int) -> Bool {
+        fileBytes > 0 && fileBytes <= wholeComicFileBudget
+    }
+
+    private func applyLocalFileBudget(_ bytes: Int) {
+        totalLocalFileBytes = bytes
+        let shouldLoadAll = Self.shouldLoadEntireComic(fileBytes: bytes)
+        guard shouldLoadAll != loadsEntireComic else { return }
+        loadsEntireComic = shouldLoadAll
+        diag("ReaderVM: 整本加载=\(shouldLoadAll) 文件总量=\(bytes / (1024 * 1024))MB 页数=\(totalPages) 上限=\(retainedCostLimit / (1024 * 1024))MB")
+        guard shouldLoadAll else { return }
+        // 放开窗口后立刻补一轮预取，而不是等下次翻页
+        preloadTask?.cancel()
+        let start = currentPage
+        preloadTask = Task { [weak self] in
+            await self?.preload(around: start)
+        }
     }
 
     func extractPTokens(from previewSet: PreviewSet) {
@@ -1215,6 +1292,8 @@ class ReaderViewModel {
     /// 需要常驻 Observable 层的页数 —— 必须 ≥ 预加载窗口，
     /// 否则刚预加载好的页会被 evictDistantPages 立刻扔掉，来回空转
     var retentionRadius: Int {
+        // 整本模式：不按距离淘汰，交给解码字节上限兜底
+        if loadsEntireComic { return max(0, totalPages) }
         // 常驻范围必须 ≥ 预取窗口，否则刚预加载好的页会被 evictDistantPages
         // 立刻扔掉，来回空转。窗口提到 100 后这里也同步放大。
         isDownloaded ? Self.maxPreloadAhead + 4 : max(5, effectivePreloadCount + 2)
@@ -1251,16 +1330,24 @@ class ReaderViewModel {
         let forward = lastPreloadAnchor.map { page >= $0 } ?? true
         lastPreloadAnchor = page
 
-        let window = Self.preloadWindow(
-            isDownloaded: isDownloaded,
-            budget: effectivePreloadCount,
-            forward: forward
-        )
+        let window: (ahead: Int, behind: Int)
+        if loadsEntireComic {
+            // 整本模式：窗口即整本，从第 0 页铺到最后一页
+            window = (ahead: max(0, totalPages), behind: max(0, totalPages))
+        } else {
+            window = Self.preloadWindow(
+                isDownloaded: isDownloaded,
+                budget: effectivePreloadCount,
+                forward: forward
+            )
+        }
         let ahead = window.ahead
         let behind = window.behind
         // 一批 5 页：用户打开后最先看到的 5 页必须在第一批里凑齐，
         // 否则会出现「前几页还在转圈，第 20 页已经好了」。
-        let batchSize = 5
+        // 整本模式放宽到 8 页一批：文件已在本地，IO 不是瓶颈；
+        // 但不再往上加 —— 12 路并发解码会把 CPU 打满（用户反馈的发烫之一）。
+        let batchSize = loadsEntireComic ? 8 : 5
 
         let lo = max(0, page - behind)
         let hi = min(totalPages - 1, page + ahead)
@@ -1280,6 +1367,9 @@ class ReaderViewModel {
         // 全量并发时第 6 页可能比第 1 页先回来，用户等的恰恰是第 1 页
         for chunk in stride(from: 0, to: candidates.count, by: batchSize) {
             if Task.isCancelled { return }
+            // 解码字节已达上限就停手：继续塞只会触发「刚加载就被淘汰」的空转，
+            // 白白烧 CPU（用户反馈的发烫，有一部分就是这个）。
+            if retainedDecodedBytes >= retainedCostLimit { return }
             let batch = candidates[chunk..<min(chunk + batchSize, candidates.count)]
             await withTaskGroup(of: Void.self) { group in
                 for p in batch {

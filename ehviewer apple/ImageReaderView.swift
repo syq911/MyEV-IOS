@@ -1434,70 +1434,20 @@ struct ImageReaderView: View {
         }
     }
 
-    // MARK: - 拖动进度条的缩略图浮层
+    // MARK: - 拖动进度条的页码提示
 
-    /// 拖动进度条时，在滑杆正上方冒出周边几页的缩略图 + 页码。
+    /// 拖动进度条时只显示页码 —— 缩略图浮层已移除。
     ///
-    /// 放正上方而不是跟随手指：拖到屏幕边缘时浮层不会跑出可视区。
-    /// 只取**已缓存**的页——拖动过程中现场解码会让手感明显变卡；
-    /// 没缓存的位置留暗块，整条浮层的宽度仍然稳定，不会忽宽忽窄。
-    @ViewBuilder
-    private var seekThumbnailStrip: some View {
-        if vm.totalPages > 0 {
-            let center = displayedPage
-            let first = max(0, center - 2)
-            let last = min(max(0, vm.totalPages - 1), center + 2)
-
-            VStack(spacing: 4) {
-                Text("\(center + 1) / \(vm.totalPages)")
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-
-                HStack(spacing: 4) {
-                    ForEach(first...last, id: \.self) { page in
-                        seekThumbnail(page: page, isCurrent: page == center)
-                    }
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(.white.opacity(0.15), lineWidth: 1)
-            )
-            .transition(.opacity.combined(with: .scale(scale: 0.96)))
-        }
-    }
-
-    @ViewBuilder
-    private func seekThumbnail(page: Int, isCurrent: Bool) -> some View {
-        let height: CGFloat = isCurrent ? 56 : 40
-        let width: CGFloat = height * 0.72
-
-        Group {
-            if let image = vm.cachedImages[page] {
-                #if os(iOS)
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                #else
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                #endif
-            } else {
-                Color.white.opacity(0.12)
-            }
-        }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(isCurrent ? Color.white : Color.white.opacity(0.12),
-                        lineWidth: isCurrent ? 2 : 1)
-        )
+    /// 原因：拖动过程中每跨过一页就要重绘浮层，而浮层取的是**整页原图**做缩略，
+    /// 在长条漫上非常耗内存带宽；用户反馈「拖动时卡」。页码只是文本，代价可忽略。
+    private var seekPageBadge: some View {
+        Text("\(displayedPage + 1) / \(vm.totalPages)")
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.black.opacity(0.72), in: Capsule())
     }
 
     private var bottomBar: some View {
@@ -1515,9 +1465,9 @@ struct ImageReaderView: View {
                 .foregroundStyle(.white.opacity(0.6))
             }
 
-            // 拖动进度条时，在滑杆上方冒出周边几页的缩略图 + 页码
+            // 拖动进度条时只显示页码（缩略图浮层已移除，见 seekPageBadge）
             if isSeeking {
-                seekThumbnailStrip
+                seekPageBadge
             }
 
             HStack(spacing: 16) {

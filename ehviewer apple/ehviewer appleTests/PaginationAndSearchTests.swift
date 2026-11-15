@@ -408,4 +408,40 @@ struct PaginationAndSearchTests {
 
         #expect(viewModel.retentionRadius >= ReaderViewModel.maxPreloadAhead + 3)
     }
+
+    // MARK: - 整本加载判定（性能：小于 500MB 的漫画一次性铺开，减少 IO）
+
+    @Test func wholeComicBudgetAcceptsSmallBooks() {
+        #expect(ReaderViewModel.shouldLoadEntireComic(fileBytes: 1))
+        #expect(ReaderViewModel.shouldLoadEntireComic(fileBytes: 50 * 1024 * 1024))
+        #expect(ReaderViewModel.shouldLoadEntireComic(
+            fileBytes: ReaderViewModel.wholeComicFileBudget - 1))
+        // 正好等于门槛也算（闭区间语义：500MB 整）
+        #expect(ReaderViewModel.shouldLoadEntireComic(
+            fileBytes: ReaderViewModel.wholeComicFileBudget))
+    }
+
+    @Test func wholeComicBudgetRejectsLargeBooks() {
+        #expect(!ReaderViewModel.shouldLoadEntireComic(
+            fileBytes: ReaderViewModel.wholeComicFileBudget + 1))
+        #expect(!ReaderViewModel.shouldLoadEntireComic(fileBytes: 2 * 1024 * 1024 * 1024))
+    }
+
+    @Test func wholeComicBudgetRejectsZero() {
+        // 0 = 探测失败 / 空目录：不能因为「读不到大小」就误判成整本加载
+        #expect(!ReaderViewModel.shouldLoadEntireComic(fileBytes: 0))
+        #expect(!ReaderViewModel.shouldLoadEntireComic(fileBytes: -1))
+    }
+
+    @Test func wholeComicBudgetIs500MB() {
+        #expect(ReaderViewModel.wholeComicFileBudget == 500 * 1024 * 1024)
+    }
+
+    /// 未开启整本模式时，常驻半径仍是旧行为（不破坏既有体验）
+    @Test @MainActor func retentionRadiusStaysBoundedForLargeBooks() {
+        let viewModel = ReaderViewModel()
+        viewModel.isDownloaded = true
+        #expect(!viewModel.loadsEntireComic, "默认不开整本加载")
+        #expect(viewModel.retentionRadius == ReaderViewModel.maxPreloadAhead + 4)
+    }
 }

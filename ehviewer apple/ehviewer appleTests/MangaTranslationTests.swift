@@ -445,4 +445,65 @@ struct MangaTranslationTests {
             drawText("よろしくおねがいします", ctx, x: 150, y: 420, fontSize: 50, vertical: true, pageHeight: size.height)
         }
     }
+
+// MARK: - 并发闸门
+
+/// 记录并发峰值的探针（actor：跨任务安全）
+private actor GateProbe {
+    private var active = 0
+    private(set) var maxObserved = 0
+    private(set) var finished = 0
+
+    func enter() {
+        active += 1
+        if active > maxObserved { maxObserved = active }
+    }
+
+    func leave() {
+        active -= 1
+        finished += 1
+    }
+
+    func snapshot() -> (max: Int, finished: Int) { (maxObserved, finished) }
+}
+
+/// 翻译提速靠的就是「网络多路并行、CPU 环节设闸」。
+/// 闸门本身写错（漏放名额 / 多放名额）会表现为「翻译卡住」或「又烧起来」，
+/// 单测盯住这两条：峰值不超限、全部任务都能完成（不会死锁）。
+struct ConcurrencyGateTests {
+
+    @Test func neverExceedsLimitUnderLoad() async {
+        let gate = ConcurrencyGate(limit: 3)
+        let probe = GateProbe()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    await gate.acquire()
+                    await probe.enter()
+                    try? await Task.sleep(for: .milliseconds(5))
+                    await probe.leave()
+                    await gate.release()
+                }
+            }
+        }
+
+        let snapshot = await probe.snapshot()
+        #expect(snapshot.max <= 3, "并发峰值不能超过闸门上限")
+        #expect(snapshot.finished == 12, "所有任务都必须跑完 —— 漏放名额会卡在这里")
+    }
+
+    @Test func sequentialAcquireReleaseDoesNotDeadlock() async {
+        let gate = ConcurrencyGate(limit: 2)
+        for _ in 0..<5 {
+            await gate.acquire()
+            await gate.release()
+        }
+        // 还能继续拿到名额就说明计数没跑偏
+        await gate.acquire()
+        await gate.acquire()
+        await gate.release()
+        await gate.release()
+    }
+}
 }
