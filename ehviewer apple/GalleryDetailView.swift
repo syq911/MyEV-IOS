@@ -588,7 +588,7 @@ struct GalleryDetailView: View {
             }
             
             // 调试信息：提示用户下载标签数据库
-            if showTranslations && !tagDb.isLoaded {
+            if showTranslations && !vm.isTagDatabaseLoaded {
                 Text("请在设置中更新标签翻译数据库")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -1057,13 +1057,18 @@ class GalleryDetailViewModel {
     /// 而重绘会因为下载轮询等状态变化反复触发，这就是进详情页发卡的一个重要来源。
     private(set) var tagTranslations: [String: String] = [:]
 
+    /// 标签库是否已加载（决定要不要提示「去设置里更新数据库」）
+    private(set) var isTagDatabaseLoaded = false
+
     /// 进详情页时算一次标签译文；关掉标签翻译就清空
     func refreshTagTranslations(_ groups: [GalleryTagGroup]) {
         guard AppSettings.shared.showTagTranslations, !groups.isEmpty else {
             tagTranslations = [:]
+            isTagDatabaseLoaded = EhTagDatabase.shared.isLoaded
             return
         }
         let db = EhTagDatabase.shared
+        isTagDatabaseLoaded = db.isLoaded
         var map: [String: String] = [:]
         for group in groups {
             let nsKey = "rows:\(group.groupName)"
