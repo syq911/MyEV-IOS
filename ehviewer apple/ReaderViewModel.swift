@@ -1296,7 +1296,7 @@ class ReaderViewModel {
         if loadsEntireComic { return max(0, totalPages) }
         // 常驻范围必须 ≥ 预取窗口，否则刚预加载好的页会被 evictDistantPages
         // 立刻扔掉，来回空转。窗口提到 100 后这里也同步放大。
-        isDownloaded ? Self.maxPreloadAhead + 4 : max(5, effectivePreloadCount + 2)
+        return isDownloaded ? Self.maxPreloadAhead + 4 : max(5, effectivePreloadCount + 2)
     }
 
     /// 预取窗口计算 —— 纯函数，便于回归测试 (1.4.1 计划 P2-B/P2-D)
