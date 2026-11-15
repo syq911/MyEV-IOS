@@ -1066,7 +1066,7 @@ class GalleryDetailViewModel {
         let db = EhTagDatabase.shared
         var map: [String: String] = [:]
         for group in groups {
-            let nsKey = "rows://(group.groupName)"
+            let nsKey = "rows:\(group.groupName)"
             if let translation = db.getTranslation(nsKey) {
                 map[nsKey] = translation
             }
