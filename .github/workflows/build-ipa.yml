@@ -131,8 +131,7 @@ jobs:
   test:
     runs-on: macos-latest
     timeout-minutes: 30
-    # TODO(发版前移除)：开发分支需要跑完整测试
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/fix/1.4.24' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
