@@ -204,9 +204,9 @@ struct ImageReaderView: View {
         }
         // 兜底：翻页事件可能先于图片解码完成（那一瞬间 cachedImages 里还没有这一页，
         // 于是它永远进不了翻译队列，明明缓存里有译文却一直显示原图）。
-        // 解码缓存数量一变就再确认一次当前页 —— ensureVisible 是幂等的，代价只是一次查表。
+        // 解码缓存数量一变就再确认一次当前页 —— 幂等，代价只是一次查表。
         .onChange(of: vm.cachedImages.count) { _, _ in
-            translate.ensureVisible(gid: vm.gid, currentPage: vm.currentPage, preloaded: vm.cachedImages)
+            translate.prioritizeVisible(gid: vm.gid, currentPage: vm.currentPage, preloaded: vm.cachedImages)
         }
         // Apple 端上翻译：configuration 非 nil 时由系统提供 session 执行
         .translationTask(translate.appleBridge.configuration) { session in

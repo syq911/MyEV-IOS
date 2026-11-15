@@ -148,26 +148,70 @@ final class MangaTranslationController {
 
     func onVisiblePageChanged(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
         guard autoTranslate else { return }
-        // 丢掉已经翻过去的页，释放内存、避免无用功
-        let stale = queue.filter { (jobs[$0]?.page ?? 0) < currentPage }
-        queue.removeAll { stale.contains($0) }
-        for k in stale { jobs[k] = nil }
+        // 丢掉已经翻过去的页：既清队列，也**取消**还在跑的，
+        // 否则 2 个并行槽位会被你已经翻过的页占着，当前页只能干等。
+        dropBehind(before: currentPage - 3)
         enqueuePreloaded(gid: gid, currentPage: currentPage, preloaded: preloaded)
+        // 当前页优先：这一步是「明明翻好了却不显示」的关键
+        prioritizeVisible(gid: gid, currentPage: currentPage, preloaded: preloaded)
+        // 常驻译文图只保留当前页附近：一本 1500 页的长条漫全程累积是 GB 级，
+        // 不修剪迟早被系统杀掉（重排一次只要几百毫秒，比 OOM 划算）
+        trimRendered(gid: gid, around: currentPage)
     }
 
-    /// 确认当前页进了队列 —— 幂等，只在「该页图已在内存但还没译文」时入队。
+    /// 清掉离当前页太远的**已渲染整页图**（磁盘缓存与文本行缓存不动）
+    private func trimRendered(gid: Int64, around page: Int) {
+        let prefix = "\(gid):"
+        let keep = (page - 8)...(page + 40)
+
+        func pageIndex(_ key: String) -> Int? {
+            guard key.hasPrefix(prefix) else { return nil }
+            return Int(key.dropFirst(prefix.count))
+        }
+
+        let stale = images.keys.filter { key in
+            guard let p = pageIndex(key) else { return false }
+            return !keep.contains(p)
+        }
+        guard !stale.isEmpty else { return }
+        for key in stale {
+            images.removeValue(forKey: key)
+            renderedSignature.removeValue(forKey: key)
+        }
+    }
+
+    /// 丢掉某页之前的排队项，并取消还在处理中的（留一点余量：current-3）。
+    private func dropBehind(before limit: Int) {
+        guard limit > 0 else { return }
+        let staleQueued = queue.filter { (jobs[$0]?.page ?? 0) < limit }
+        queue.removeAll { staleQueued.contains($0) }
+        for k in staleQueued { jobs[k] = nil }
+
+        for (k, task) in tasks {
+            guard let job = jobs[k], job.page < limit else { continue }
+            task.cancel()
+        }
+    }
+
+    /// 把当前页插到队首 —— 这是「译文已经翻好、但这页一直显示原图」的主因。
     ///
-    /// 补的是时序漏洞：翻页事件（currentPage 变化）可能**先于**该页图片解码完成，
-    /// 那一刻 `preloaded` 里还没有这一页，于是它永远进不了队列，
-    /// 表现是「明明缓存里有译文，这一页却一直显示原文」。
-    /// 阅读器在解码缓存数量变化时再调一次，把晚到的页补上。
-    func ensureVisible(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
+    /// 翻译是串行的（`maxConcurrent` 只有 1～2），一页要 2～5 秒。队列里躺着二十几页时，
+    /// 你翻到的新页只能排到它们**后面**，等它算完你早就翻过去了。
+    /// 而点一下开关之所以「立刻就好」：`stop()` 清空队列、`start()` 重新按距离入队，
+    /// 当前页恰好排到了队首 —— 同一个页面，位置不同，结果就不同。
+    ///
+    /// 幂等：已有译文 / 正在处理 / 图还没解码，都直接返回。
+    func prioritizeVisible(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
         guard autoTranslate, visible else { return }
         let k = key(gid: gid, page: currentPage)
-        guard images[k] == nil, jobs[k] == nil, !running.contains(k) else { return }
+        guard images[k] == nil, !running.contains(k) else { return }
         guard let image = preloaded[currentPage] else { return }
-        enqueue(gid: gid, page: currentPage, image: image)
+
+        jobs[k] = Job(gid: gid, page: currentPage, image: image)
+        queue.removeAll { $0 == k }
+        queue.insert(k, at: 0)
         pump()
+        diag("MangaTr: 当前页插队 page=\(currentPage) 队列=\(queue.count) 并行=\(running.count)")
     }
 
     /// 把预加载窗口里的页按「离当前页由近到远」入队（当前页优先）
@@ -237,13 +281,16 @@ final class MangaTranslationController {
 
             // 1) 取已翻译的文本行：内存 → 磁盘 → 才真正 OCR + 翻译
             var translated: [MangaTranslatedLine]
+            var cacheHit = false
             if let cached = lineCache[k], lineCacheSignature[k] == transSig {
                 translated = cached
+                cacheHit = true
             } else if let onDisk = MangaTranslationCache.shared.load(
                 gid: job.gid, page: job.page, signature: transSig) {
                 translated = onDisk
                 lineCache[k] = onDisk
                 lineCacheSignature[k] = transSig
+                cacheHit = true
             } else {
                 let outcome = try await MangaTranslationPipeline.translatePage(
                     image: job.image, settings: settings, bridge: appleBridge)
@@ -269,7 +316,7 @@ final class MangaTranslationController {
             // 通知 SwiftUI「这页有译文了」（大图本身不参与观察，见 renderVersion 注释）
             renderVersion &+= 1
             if autoTranslate { visible = true }
-            diag("MangaTr: 页完成 gid=\(job.gid) page=\(job.page) 行=\(translated.count)")
+            diag("MangaTr: 页完成 gid=\(job.gid) page=\(job.page) 行=\(translated.count) 命中缓存=\(cacheHit ? 1 : 0)")
         } catch is CancellationError {
             // 用户关闭或翻页丢弃，静默
         } catch {
