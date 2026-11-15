@@ -75,9 +75,16 @@ final class MangaTranslationController {
 
     private func key(gid: Int64, page: Int) -> String { "\(gid):\(page)" }
 
-    /// 并行度。现代 Vision API 超过 2 个并行会死锁，端上翻译桥也只支持单会话。
+    /// 并行度。
+    ///
+    /// - DeepSeek：一页的耗时几乎全在网络往返（1–4 秒），可以多路并行。
+    ///   OCR 另有 2 路闸门（`VisionOCRLimiter`），所以不会把 Vision 压死。
+    /// - Apple 端上翻译：桥只支持单会话，只能 1。
     private var maxConcurrent: Int {
-        MangaTranslationSettings.shared.provider == .appleOnDevice ? 1 : 2
+        switch MangaTranslationSettings.shared.provider {
+        case .appleOnDevice: return 1
+        case .deepSeek: return 6
+        }
     }
 
     // MARK: - 签名（与下载页「一键翻译」共用同一套，保证两边命中同一份持久化缓存）
@@ -303,13 +310,16 @@ final class MangaTranslationController {
             }
             try Task.checkCancellation()
 
-            // 2) 渲染（纯布局，快）；无文字的页直接渲染原图
+            // 2) 渲染（纯 CoreGraphics，可离线；放到后台线程做，别占主线程）
             let options = MangaTypesetter.Options(
                 useSampledBackground: settings.useSampledBackground,
                 showOriginalText: settings.showOriginalText,
                 fontScale: CGFloat(settings.fontScale)
             )
-            let rendered = MangaTypesetter.render(original: job.image, lines: translated, options: options)
+            let sourceImage = job.image
+            let rendered = await Task.detached(priority: .userInitiated) {
+                MangaTypesetter.render(original: sourceImage, lines: translated, options: options)
+            }.value
             try Task.checkCancellation()
             images[k] = rendered
             renderedSignature[k] = renderSig

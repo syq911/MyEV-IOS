@@ -30,9 +30,42 @@ enum MangaTranslationOutcome: Sendable {
     }
 }
 
+// MARK: - OCR 并发闸门
+
+/// Vision OCR 的并发闸门。
+///
+/// 为什么不直接把整页并发降下来：一页的耗时大头是**翻译请求的往返**（1–4 秒），
+/// OCR 只占几百毫秒。把 OCR 卡在 2 路、其余页并行等网络，既避开 Vision 的并行死锁
+/// （>2 路会卡死，历史上踩过），又能把吞吐拉起来。
+actor VisionOCRLimiter {
+    static let shared = VisionOCRLimiter(limit: 2)
+
+    private let limit: Int
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = max(1, limit) }
+
+    func acquire() async {
+        if active < limit {
+            active += 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// 名额直接转交给下一个等待者，不做「先减后加」，避免中间被插队
+    func release() {
+        if waiters.isEmpty {
+            active = max(0, active - 1)
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 @MainActor
 enum MangaTranslationPipeline {
-
     /// 影响「翻译结果」的设置签名（换语言/后端/模型 → 需要重翻）
     static func translationSignature(_ s: MangaTranslationSettings) -> String {
         let model = s.provider == .deepSeek ? s.deepSeekModel : ""
@@ -58,11 +91,16 @@ enum MangaTranslationPipeline {
         }
         let languages = settings.sourceLanguage.visionLanguages
         let useFallback = settings.usesLineDropFallback
-        let lines: [MangaTextLine] = try await Task.detached(priority: .userInitiated) {
+        // OCR 走闸门（最多 2 路），翻译请求不受限 —— 见 VisionOCRLimiter 的注释
+        await VisionOCRLimiter.shared.acquire()
+        let ocrResult = await Task.detached(priority: .userInitiated) {
             var recognizer = VisionTextRecognizer(languages: languages)
             recognizer.usesLineDropFallback = useFallback
             return try await recognizer.recognize(in: cgImage)
-        }.value
+        }.result
+        await VisionOCRLimiter.shared.release()
+
+        let lines: [MangaTextLine] = try ocrResult.get()
         try Task.checkCancellation()
 
         // ★ 无文字 → 正常的「空页」，不抛错、不中断

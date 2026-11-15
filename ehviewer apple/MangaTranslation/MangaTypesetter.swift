@@ -22,7 +22,7 @@ import AppKit
 
 enum MangaTypesetter {
 
-    struct Options {
+    struct Options: Sendable {
         /// 盖框底色：true=取样原文框周边底色；false=纯白
         var useSampledBackground: Bool = true
         /// 是否额外标注一行小号原文

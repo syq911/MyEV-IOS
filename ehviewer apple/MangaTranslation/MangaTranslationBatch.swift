@@ -150,48 +150,94 @@ final class MangaTranslationBatch {
         }
 
         // 2) 跳过已经翻过的页（含空标记）
-        var doneSet = cache.translatedPages(gid: gid, signature: signature)
+        let doneSet = cache.translatedPages(gid: gid, signature: signature)
         var done = pages.filter { doneSet.contains($0) }.count
         var failed = 0
         jobs[gid] = Job(total: pages.count, done: done, failed: 0, phase: .running)
 
-        for page in pages {
-            if Task.isCancelled {
-                mutateJob(gid) { $0.phase = .cancelled }
-                return
-            }
-            guard !doneSet.contains(page), let url = urls[page] else { continue }
+        let todo: [(page: Int, url: URL)] = pages.compactMap { page in
+            guard !doneSet.contains(page), let url = urls[page] else { return nil }
+            return (page, url)
+        }
+        // 并行宽度：一页的耗时几乎全在翻译请求往返，4 路能把整本时间压到 1/3 左右。
+        // Apple 端上翻译的桥只支持单会话，只能串行。
+        let width = settings.provider == .appleOnDevice ? 1 : 4
 
-            var attempt = 0
-            var succeeded = false
-            while attempt < 2, !succeeded {
-                attempt += 1
-                do {
-                    let image = try await decode(url)
-                    let outcome = try await MangaTranslationPipeline.translatePage(
-                        image: image, settings: settings, bridge: appleBridge)
-                    cache.save(gid: gid, page: page, signature: signature, lines: outcome.lines)
-                    doneSet.insert(page)
-                    done += 1
-                    mutateJob(gid) { $0.done = done }
-                    succeeded = true
-                } catch is CancellationError {
+        // 原先是一页一页串行：1554 页 × 2–5 秒 = 一两个小时。
+        // 改成有界并发（固定 width 个在飞，完成一个补一个），页序不影响结果。
+        await withTaskGroup(of: Bool.self) { group in
+            var next = 0
+            while next < width, next < todo.count {
+                let item = todo[next]
+                next += 1
+                group.addTask { [weak self] in
+                    guard let self else { return false }
+                    return await self.translateBatchPage(
+                        page: item.page, url: item.url, gid: gid,
+                        settings: settings, signature: signature
+                    )
+                }
+            }
+
+            for await succeeded in group {
+                if succeeded { done += 1 } else { failed += 1 }
+                mutateJob(gid) { $0.done = done; $0.failed = failed }
+                if Task.isCancelled {
+                    group.cancelAll()
                     mutateJob(gid) { $0.phase = .cancelled }
                     return
-                } catch {
-                    if attempt >= 2 {
-                        failed += 1
-                        mutateJob(gid) { $0.failed = failed }
-                        diag("MangaTr/Batch: 页失败 gid=\(gid) page=\(page) —— \(error.localizedDescription)")
-                    } else {
-                        try? await Task.sleep(for: .milliseconds(400))
+                }
+                if next < todo.count {
+                    let item = todo[next]
+                    next += 1
+                    group.addTask { [weak self] in
+                        guard let self else { return false }
+                        return await self.translateBatchPage(
+                            page: item.page, url: item.url, gid: gid,
+                            settings: settings, signature: signature
+                        )
                     }
                 }
             }
         }
 
+        if Task.isCancelled {
+            mutateJob(gid) { $0.phase = .cancelled }
+            return
+        }
+
         mutateJob(gid) { $0.phase = .finished }
         diag("MangaTr/Batch: 完成 gid=\(gid) 共\(pages.count)页 成功\(done) 失败\(failed)")
+    }
+
+    /// 单页：解码 → OCR+翻译 → 落盘。失败重试一次；返回是否成功。
+    private func translateBatchPage(
+        page: Int,
+        url: URL,
+        gid: Int64,
+        settings: MangaTranslationSettings,
+        signature: String
+    ) async -> Bool {
+        for attempt in 1...2 {
+            do {
+                let image = try await decode(url)
+                let outcome = try await MangaTranslationPipeline.translatePage(
+                    image: image, settings: settings, bridge: appleBridge)
+                // 无文字的页也写空标记：下次不再重试，且计入「已翻译」
+                MangaTranslationCache.shared.save(
+                    gid: gid, page: page, signature: signature, lines: outcome.lines)
+                return true
+            } catch is CancellationError {
+                return false
+            } catch {
+                if attempt == 2 {
+                    diag("MangaTr/Batch: 页失败 gid=\(gid) page=\(page) —— \(error.localizedDescription)")
+                    return false
+                }
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+        }
+        return false
     }
 
     private func decode(_ url: URL) async throws -> PlatformImage {
