@@ -45,7 +45,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="1.4.24"
+            VERSION="1.4.25"
           fi
           echo "版本号: $VERSION"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
@@ -131,7 +131,8 @@ jobs:
   test:
     runs-on: macos-latest
     timeout-minutes: 30
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    # TODO(发版前移除)：开发分支需要跑完整测试
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/fix/1.4.25' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4

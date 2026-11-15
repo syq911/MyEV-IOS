@@ -37,6 +37,17 @@ final class MangaTranslationController {
     /// 最近一次失败信息（点击后消除）
     private(set) var failureMessage: String?
 
+    /// 译文渲染版本号：每渲染完一页 +1。
+    ///
+    /// 存在的唯一原因：`images` 里装的是整页大图，刻意标了 `@ObservationIgnored`
+    /// （否则每次写入都会让阅读器整页重算），但这样 SwiftUI 就**不知道**「某页的译文
+    /// 刚渲染好」。结果就是：译文在你停在该页之后才算完时，画面不会刷新，看到的一直是原图，
+    /// 直到别的东西（点一下唤出工具栏、翻页）触发重绘 —— 用户看到的现象是
+    /// 「看几十页后只剩原文，点一下才出现译文」。
+    ///
+    /// 所以单独暴露一个轻量计数，由 `displayImage` 读一下，自然进入 body 的依赖集。
+    private(set) var renderVersion: Int = 0
+
     /// Apple 端上翻译桥（视图侧用 `.translationTask` 消费）
     @ObservationIgnored let appleBridge = AppleTranslationBridge()
 
@@ -87,6 +98,9 @@ final class MangaTranslationController {
 
     /// 展示用图片：显示译文且该页已有译文时返回译文图，否则返回原图
     func displayImage(gid: Int64, page: Int, original: PlatformImage?) -> PlatformImage? {
+        // 读一下版本号：建立「译文渲染完成 → 页面重绘」的观察依赖。
+        // 不能只靠 `visible`（它只在开关翻译时变化）。
+        _ = renderVersion
         if visible, let translated = images[key(gid: gid, page: page)] { return translated }
         return original
     }
@@ -104,6 +118,7 @@ final class MangaTranslationController {
         lineCache = lineCache.filter { !$0.key.hasPrefix(prefix) }
         lineCacheSignature = lineCacheSignature.filter { !$0.key.hasPrefix(prefix) }
         cancelAll()
+        renderVersion &+= 1
     }
 
     // MARK: - 顶部按钮：开 / 关连续翻译
@@ -138,6 +153,21 @@ final class MangaTranslationController {
         queue.removeAll { stale.contains($0) }
         for k in stale { jobs[k] = nil }
         enqueuePreloaded(gid: gid, currentPage: currentPage, preloaded: preloaded)
+    }
+
+    /// 确认当前页进了队列 —— 幂等，只在「该页图已在内存但还没译文」时入队。
+    ///
+    /// 补的是时序漏洞：翻页事件（currentPage 变化）可能**先于**该页图片解码完成，
+    /// 那一刻 `preloaded` 里还没有这一页，于是它永远进不了队列，
+    /// 表现是「明明缓存里有译文，这一页却一直显示原文」。
+    /// 阅读器在解码缓存数量变化时再调一次，把晚到的页补上。
+    func ensureVisible(gid: Int64, currentPage: Int, preloaded: [Int: PlatformImage]) {
+        guard autoTranslate, visible else { return }
+        let k = key(gid: gid, page: currentPage)
+        guard images[k] == nil, jobs[k] == nil, !running.contains(k) else { return }
+        guard let image = preloaded[currentPage] else { return }
+        enqueue(gid: gid, page: currentPage, image: image)
+        pump()
     }
 
     /// 把预加载窗口里的页按「离当前页由近到远」入队（当前页优先）
@@ -236,6 +266,8 @@ final class MangaTranslationController {
             try Task.checkCancellation()
             images[k] = rendered
             renderedSignature[k] = renderSig
+            // 通知 SwiftUI「这页有译文了」（大图本身不参与观察，见 renderVersion 注释）
+            renderVersion &+= 1
             if autoTranslate { visible = true }
             diag("MangaTr: 页完成 gid=\(job.gid) page=\(job.page) 行=\(translated.count)")
         } catch is CancellationError {
