@@ -203,4 +203,46 @@ struct DownloadOrderingTests {
         let gids = try db.getAllDownloads().map { $0.gid }
         #expect(gids == [3, 2, 1])
     }
+
+// MARK: - 下载目录解析（标题变过也要能找到旧目录）
+
+/// 背景：目录名是 `{gid}-{标题}`，而标题会变（titleJpn 补全 / 改名 / bestTitle 变化）。
+/// 一旦变过，精确路径就是新目录 → 下载器以为「一页都没下」、阅读器只看到新目录里那几页，
+/// 用户看到的就是「明明下载完的漫画，打开要一页页重新下」。
+/// 这里钉住的是「按 gid 前缀找同族目录、挑图片最多的」这条兜底逻辑。
+struct DownloadDirectoryResolutionTests {
+
+    private func makeRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dl-dir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func writePages(into dir: URL, count: Int) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for page in 1...max(count, 1) where count > 0 {
+            let name = String(format: "%08d.jpg", page)
+            try Data("x".utf8).write(to: dir.appendingPathComponent(name))
+        }
+    }
+
+    @Test func imageCountOnlyCountsImages() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try writePages(into: root, count: 3)
+        try Data("x".utf8).write(to: root.appendingPathComponent("notes.txt"))
+        try Data("x".utf8).write(to: root.appendingPathComponent("thumb.webp"))
+
+        // 3 张 jpg + 1 张 webp；txt 不算
+        #expect(DownloadManager.imageCount(in: root) == 4)
+    }
+
+    @Test func imageCountOfMissingDirectoryIsZero() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-such-\(UUID().uuidString)", isDirectory: true)
+        #expect(DownloadManager.imageCount(in: url) == 0)
+    }
+}
 }

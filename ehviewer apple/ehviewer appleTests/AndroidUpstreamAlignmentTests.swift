@@ -183,4 +183,28 @@ struct AndroidUpstreamAlignmentTests {
         #expect(!url.contains("%0D"))
         #expect(!url.contains("\n"))
     }
+
+// MARK: - 列表条目的语言（搜索/热门/标签列表都靠它）
+
+/// 列表 HTML 不含语言标签，语言是从 gdata 接口的 tags 里推出来的
+/// （`fillGalleryListByApi` → `generateSLang`）。这条映射错了，
+/// 搜索结果的「语言」就永远不显示 —— 所以把映射本身钉住。
+struct GalleryListLanguageTests {
+
+    @Test func mapsCommonLanguages() {
+        #expect(GalleryApiParser.generateSLang(from: ["language:chinese"]) == "ZH")
+        #expect(GalleryApiParser.generateSLang(from: ["language:japanese"]) == "JA")
+        #expect(GalleryApiParser.generateSLang(from: ["language:english"]) == "EN")
+    }
+
+    @Test func ignoresUnrelatedTags() {
+        #expect(GalleryApiParser.generateSLang(from: []) == nil)
+        #expect(GalleryApiParser.generateSLang(from: ["artist:someone", "female:sole female"]) == nil)
+    }
+
+    @Test func findsLanguageAmongManyTags() {
+        let tags = ["artist:abc", "female:sole female", "language:korean", "other:full color"]
+        #expect(GalleryApiParser.generateSLang(from: tags) == "KO")
+    }
+}
 }

@@ -643,9 +643,56 @@ public actor DownloadManager {
     }
 
     /// 画廊下载目录 (对应 Android: gid-sanitized_title)
+    ///
+    /// ⚠️ 目录名里带 title，而 **title 会变**（titleJpn 补全、改名、站点返回的 bestTitle 变化）。
+    /// 只要变过一次，`{gid}-{新标题}` 就是一个**新目录**：
+    /// - 下载器认为「一页都没下」，从头再下一遍；
+    /// - 阅读器只看到新目录里那寥寥几页，其余全部回退网络。
+    /// 用户看到的就是「明明下载完的漫画，打开要一页一页重新下」。
+    ///
+    /// 所以这里不再只看精确路径：同 gid 的已有目录（目录名以 `{gid}-` 开头）也算数，
+    /// 并且优先用图片更多的那个。gid 稳定，title 不稳定。
     public nonisolated func galleryDirectory(gid: Int64, title: String) -> URL {
-        let dirName = Self.galleryDirectoryName(gid: gid, title: title)
-        return downloadDirectory.appendingPathComponent(dirName)
+        let exact = downloadDirectory.appendingPathComponent(
+            Self.galleryDirectoryName(gid: gid, title: title)
+        )
+        let exactExists = FileManager.default.fileExists(atPath: exact.path)
+
+        guard let candidates = siblingDirectories(gid: gid) else { return exact }
+        guard let best = candidates.max(by: { $0.imageCount < $1.imageCount }) else { return exact }
+
+        if !exactExists {
+            diag("DownloadManager: gid=\(gid) 精确目录不存在，复用 \(best.name)（\(best.imageCount) 页）")
+            return best.url
+        }
+
+        let exactCount = Self.imageCount(in: exact)
+        guard best.imageCount > exactCount else { return exact }
+        diag("DownloadManager: gid=\(gid) \(best.name) 页数更多（\(best.imageCount) > \(exactCount)），改用它")
+        return best.url
+    }
+
+    /// 下载根目录下所有 `{gid}-*` 目录及其图片数（gid 后面的 `-` 保证不会误匹配 434425 → 4344251）
+    private nonisolated func siblingDirectories(gid: Int64) -> [(url: URL, name: String, imageCount: Int)]? {
+        let prefix = "\(gid)-"
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: downloadDirectory.path) else {
+            return nil
+        }
+        let matched = names.filter { $0.hasPrefix(prefix) }
+        guard !matched.isEmpty else { return nil }
+        return matched.map { name in
+            let url = downloadDirectory.appendingPathComponent(name, isDirectory: true)
+            return (url, name, Self.imageCount(in: url))
+        }
+    }
+
+    /// 目录里的图片文件数（不递归）
+    public nonisolated static func imageCount(in directory: URL) -> Int {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.reduce(0) { count, name in
+            let ext = (name as NSString).pathExtension.lowercased()
+            return count + (["jpg", "jpeg", "png", "gif", "webp"].contains(ext) ? 1 : 0)
+        }
     }
 
     /// 图片文件名 (对应 Android: String.format("%08d%s", index+1, ext))

@@ -320,7 +320,17 @@ public actor EhAPI {
         try checkResponse(response, data: data, requestUrl: url)
 
         let body = String(data: data, encoding: .utf8) ?? ""
-        return try GalleryListParser.parse(body)
+        var result = try GalleryListParser.parse(body)
+
+        // 列表 HTML 里**没有**语言标签（只有分类、上传者、页数），
+        // 语言只能从 gdata 接口的 tags 推出来（对应 Android fillGalleryListByApi）。
+        // 不补这一步，热门/搜索/标签等所有列表条目的「语言」都是空的。
+        // 失败不能影响列表本身：拿不到就退回不显示。
+        if !result.galleries.isEmpty,
+           result.galleries.contains(where: { $0.simpleLanguage == nil }) {
+            try? await fillGalleryListByApi(galleries: &result.galleries)
+        }
+        return result
     }
 
     /// 获取画廊详情 (对应 Android getGalleryDetail)

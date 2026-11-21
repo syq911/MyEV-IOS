@@ -704,7 +704,10 @@ class ReaderViewModel {
         self.isDownloaded = dir != nil
         // 目录枚举一次，建立页码 → 文件 URL 映射（1.4.1 计划 P2-D）
         self.localFileURLs = dir.map { Self.scanLocalImageURLs(in: $0) } ?? [:]
-        diag("setupLocalGallery: 完成 isDownloaded=\(isDownloaded) 本地页数=\(localFileURLs.count)")
+        // 把目录名和「本地缺页数」也打出来：下次遇到「下载过却要重新下」能直接定位是
+        // 目录名不对（标题变过）还是文件确实缺失。
+        let dirName = dir?.lastPathComponent ?? "nil"
+        diag("setupLocalGallery: 完成 isDownloaded=\(isDownloaded) 目录=\(dirName) 本地页数=\(localFileURLs.count)")
         if !localFileURLs.isEmpty {
             let urls = localFileURLs.keys.sorted().compactMap { localFileURLs[$0] }
             probeLocalFileBudget(urls)
